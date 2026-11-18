@@ -24,6 +24,7 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 
 import lan_core as L
+import http_dl
 import theme
 from bubble import Bubble
 
@@ -140,6 +141,72 @@ class PreviewDialog(QDialog):
             self.player.stop()
         super().closeEvent(e)
 
+# ---------------- 下载任务卡片 ----------------
+
+class DownloadTaskCard(QFrame):
+    def __init__(self, path, name, threads, dark=False, parent=None):
+        super().__init__(parent)
+        self.path, self.name, self.threads = path, name, threads
+        self.finished = False
+        self.task = None
+        self.setObjectName("card")
+        bg = "#1e2536" if dark else "#ffffff"
+        bd = "#2c3547" if dark else "#e4e9f2"
+        self.setStyleSheet("QFrame#card{background:%s;border:1px solid %s;border-radius:12px;}" % (bg, bd))
+        v = QVBoxLayout(self); v.setContentsMargins(12, 10, 12, 10); v.setSpacing(6)
+
+        row = QHBoxLayout()
+        self.name_lbl = QLabel("📥 " + name)
+        self.name_lbl.setStyleSheet("font-weight:600;font-size:13px;")
+        self.name_lbl.setWordWrap(True)
+        row.addWidget(self.name_lbl, 1)
+        self.state_lbl = QLabel("准备中")
+        self.state_lbl.setObjectName("badge")
+        row.addWidget(self.state_lbl)
+        v.addLayout(row)
+
+        self.bar = QProgressBar(); self.bar.setRange(0, 100); self.bar.setValue(0)
+        v.addWidget(self.bar)
+
+        meta = QHBoxLayout()
+        self.speed_lbl = QLabel("0 B/s · %d 线程" % threads)
+        self.speed_lbl.setObjectName("sub")
+        meta.addWidget(self.speed_lbl)
+        meta.addStretch(1)
+        self.open_btn = QPushButton("打开文件夹")
+        self.open_btn.setObjectName("small"); self.open_btn.setProperty("cls", "ghost")
+        self.open_btn.clicked.connect(self.open_folder)
+        self.open_btn.hide()
+        meta.addWidget(self.open_btn)
+        v.addLayout(meta)
+
+    def update_progress(self, done, total, speed, state):
+        pct = int(done * 100 / total) if total else 0
+        self.bar.setValue(max(0, min(100, pct)))
+        self.state_lbl.setText(state)
+        self.speed_lbl.setText("%s / %s · %s/s · %d 线程" % (
+            L.fmt_size(done), L.fmt_size(total), L.fmt_size(speed), self.threads))
+
+    def finish(self, ok, message):
+        self.finished = True
+        self.state_lbl.setText("✓ 完成" if ok else "✕ " + message[:16])
+        if ok:
+            self.bar.setValue(100)
+            self.open_btn.show()
+
+    def set_dark(self, dark):
+        bg = "#1e2536" if dark else "#ffffff"
+        bd = "#2c3547" if dark else "#e4e9f2"
+        self.setStyleSheet("QFrame#card{background:%s;border:1px solid %s;border-radius:12px;}" % (bg, bd))
+
+    def open_folder(self):
+        import subprocess
+        folder = os.path.dirname(self.path)
+        try:
+            subprocess.Popen(["explorer", folder])
+        except Exception:
+            pass
+
 # ---------------- 通用工具 ----------------
 
 def pick_save_path(default_name, parent):
@@ -151,14 +218,15 @@ def pick_save_path(default_name, parent):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("极速下载器 Windows · 局域网互传（与安卓互通）")
-        self.resize(1040, 760)
-        self.setMinimumSize(920, 640)
+        self.setWindowTitle("极速下载器 Windows · HTTP 高速下载 + 局域网互传（与安卓互通）")
+        self.resize(1180, 800)
+        self.setMinimumSize(960, 660)
         self.dark = False
         self.hub = None            # 本机开的房间（host）
         self.client = None         # 加入安卓房间（guest）
-        self.mode = "host"         # host / guest
+        self.mode = "download"     # download / host / guest
         self.room_on = False
+        self.dl_tasks = []         # HTTP 下载任务列表
         self.msgs = []
         self.last_sig = ""
         self.clear_ts = 0
@@ -185,7 +253,7 @@ class MainWindow(QWidget):
         tb = QHBoxLayout(titlebar); tb.setContentsMargins(18, 0, 12, 0)
         brand = QLabel("⚡ 极速下载器")
         brand.setStyleSheet("font-size:16px;font-weight:800;color:#2f6fed;")
-        sub = QLabel("Windows 版 · 与安卓互通")
+        sub = QLabel("Windows 版 · HTTP 多线程下载 + 与安卓互通")
         sub.setObjectName("sub")
         tb.addWidget(brand); tb.addWidget(sub); tb.addStretch(1)
         theme_btn = QPushButton("◐ 主题")
@@ -198,35 +266,92 @@ class MainWindow(QWidget):
         root.addWidget(titlebar)
         self.titlebar = titlebar
 
-        body = QHBoxLayout(); body.setContentsMargins(16, 0, 16, 16); body.setSpacing(14)
-
-        # 左侧：模式与房间信息
-        left = QFrame(); left.setObjectName("card"); left.setFixedWidth(340)
-        lv = QVBoxLayout(left); lv.setContentsMargins(18, 18, 18, 18); lv.setSpacing(12)
-        tabrow = QHBoxLayout()
-        self.tab_host = QPushButton("开房间"); self.tab_host.setCheckable(True); self.tab_host.setChecked(True)
-        self.tab_guest = QPushButton("加入房间"); self.tab_guest.setCheckable(True)
-        self.tab_host.setObjectName("tab"); self.tab_guest.setObjectName("tab")
+        # 顶部主模式切换（贯穿整宽，避免左栏 dropdown 拥挤）
+        modetabs = QHBoxLayout(); modetabs.setContentsMargins(16, 0, 16, 8); modetabs.setSpacing(8)
+        self.tab_dl = QPushButton("⬇ HTTP 高速下载"); self.tab_dl.setCheckable(True); self.tab_dl.setChecked(True)
+        self.tab_host = QPushButton("📡 开房间"); self.tab_host.setCheckable(True)
+        self.tab_guest = QPushButton("🔗 加入房间"); self.tab_guest.setCheckable(True)
+        for t in (self.tab_dl, self.tab_host, self.tab_guest):
+            t.setObjectName("tab"); modetabs.addWidget(t)
+        self.tab_dl.clicked.connect(lambda: self.switch_mode("download"))
         self.tab_host.clicked.connect(lambda: self.switch_mode("host"))
         self.tab_guest.clicked.connect(lambda: self.switch_mode("guest"))
-        tabrow.addWidget(self.tab_host); tabrow.addWidget(self.tab_guest)
-        lv.addLayout(tabrow)
+        modetabs.addStretch(1)
+        root.addLayout(modetabs)
 
-        self.stack = QStackedWidget()
+        # 主内容区：左侧控制面板（自适应宽度）+ 右侧功能区
+        body = QHBoxLayout(); body.setContentsMargins(16, 0, 16, 16); body.setSpacing(14)
+
+        left = QFrame(); left.setObjectName("card")
+        left.setMinimumWidth(300)
+        left.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        lv = QVBoxLayout(left); lv.setContentsMargins(16, 16, 16, 16); lv.setSpacing(9)
+
+        self.stack = QStackedWidget()  # 三个模式面板：download / host / guest
+        self.stack.addWidget(self._build_download_panel())
         self.stack.addWidget(self._build_host_panel())
         self.stack.addWidget(self._build_guest_panel())
-        lv.addWidget(self.stack)
-        lv.addStretch(1)
-        body.addWidget(left)
+        lv.addWidget(self.stack, 1)
+        body.addWidget(left, 0)   # 左栏不强行拉伸，靠 minimumWidth 保证可读
 
-        # 右侧：聊天区
-        chatcard = QFrame(); chatcard.setObjectName("card")
-        cv = QVBoxLayout(chatcard); cv.setContentsMargins(16, 14, 16, 14); cv.setSpacing(10)
+        # 右侧：三合一堆叠（下载任务 / 聊天）
+        self.right_stack = QStackedWidget()
+        self.right_stack.addWidget(self._build_download_tasks())
+        self.right_stack.addWidget(self._build_chat_area())
+        body.addWidget(self.right_stack, 1)
+        root.addLayout(body, 1)
+
+    def _build_download_panel(self):
+        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
+        tip = QLabel("多线程分片下载 HTTP / HTTPS 直链，支持断点续传。")
+        tip.setObjectName("sub"); tip.setWordWrap(True); v.addWidget(tip)
+
+        v.addWidget(QLabel("下载链接（http / https）"))
+        self.dl_url = QLineEdit(); self.dl_url.setPlaceholderText("https://example.com/file.zip")
+        self.dl_url.setMinimumHeight(38); v.addWidget(self.dl_url)
+
+        th = QHBoxLayout(); th.addWidget(QLabel("线程数"))
+        self.dl_threads = QComboBox(); self.dl_threads.addItems(["2", "4", "8", "16", "32"])
+        self.dl_threads.setCurrentText("8"); th.addWidget(self.dl_threads); th.addStretch(1)
+        v.addLayout(th)
+
+        self.dl_btn = QPushButton("⬇ 开始下载"); self.dl_btn.clicked.connect(self.start_download)
+        v.addWidget(self.dl_btn)
+        self.dl_pause = QPushButton("暂停 / 继续"); self.dl_pause.setObjectName("ghost")
+        self.dl_pause.clicked.connect(self.pause_current_download); v.addWidget(self.dl_pause)
+
+        hint = QLabel("提示：服务器需支持 Range 才能多线程；不支持时自动单线程下载。断点进度保存在 .part 文件，中断后可重新添加同一链接继续。")
+        hint.setObjectName("sub"); hint.setWordWrap(True); v.addWidget(hint)
+        v.addStretch(1)
+        return w
+
+    def _build_download_tasks(self):
+        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0)
+        card = QFrame(); card.setObjectName("card")
+        cv = QVBoxLayout(card); cv.setContentsMargins(16, 14, 16, 14); cv.setSpacing(10)
+        h = QHBoxLayout(); t = QLabel("下载任务"); t.setObjectName("h2")
+        self.dl_summary = QLabel("空闲"); self.dl_summary.setObjectName("badge")
+        h.addWidget(t); h.addWidget(self.dl_summary); h.addStretch(1)
+        clr = QPushButton("清除已完成"); clr.setObjectName("small"); clr.clicked.connect(self.clear_finished_downloads)
+        h.addWidget(clr)
+        cv.addLayout(h)
+        self.dl_scroll = QScrollArea(); self.dl_scroll.setWidgetResizable(True)
+        self.dl_box = QWidget(); self.dl_list = QVBoxLayout(self.dl_box)
+        self.dl_list.setContentsMargins(4, 4, 4, 4); self.dl_list.setSpacing(8)
+        self.dl_list.addStretch(1)
+        self.dl_scroll.setWidget(self.dl_box)
+        cv.addWidget(self.dl_scroll, 1)
+        v.addWidget(card)
+        return w
+
+    def _build_chat_area(self):
+        card = QFrame(); card.setObjectName("card")
+        cv = QVBoxLayout(card); cv.setContentsMargins(16, 14, 16, 14); cv.setSpacing(10)
         head = QHBoxLayout()
         h2 = QLabel("聊天 · 文件互传"); h2.setObjectName("h2")
         self.status = QLabel("未连接"); self.status.setObjectName("badge")
         head.addWidget(h2); head.addWidget(self.status); head.addStretch(1)
-        clr = QPushButton("清空聊天"); clr.setObjectName("small"); clr.setProperty("cls","gray")
+        clr = QPushButton("清空聊天"); clr.setObjectName("small")
         clr.clicked.connect(self.ask_clear)
         head.addWidget(clr)
         cv.addLayout(head)
@@ -239,7 +364,9 @@ class MainWindow(QWidget):
         cv.addWidget(self.scroll, 1)
 
         self.newmsg = QPushButton("↓ 新消息"); self.newmsg.setObjectName("small")
-        self.newmsg.hide(); self.newmsg.clicked.connect(self.goto_bottom)
+        self.newmsg.clicked.connect(self.goto_bottom)
+        self.newmsg.hide()
+        cv.addWidget(self.newmsg)
 
         inp = QHBoxLayout()
         self.input = QLineEdit(); self.input.setPlaceholderText("说点什么，回车发送…")
@@ -253,38 +380,41 @@ class MainWindow(QWidget):
         tools.addWidget(upf); tools.addWidget(upd); tools.addStretch(1)
         cv.addLayout(tools)
         self.progress = QProgressBar(); self.progress.hide(); cv.addWidget(self.progress)
-        body.addWidget(chatcard)
-        root.addLayout(body, 1)
+        return card
 
     def _build_host_panel(self):
-        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(10)
-        tip = QLabel("开启房间后，同一 Wi-Fi 下的安卓 App 或浏览器输入地址 + 口令即可加入，无需服务器。")
+        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
+        tip = QLabel("开房间后，同一 Wi-Fi 下的安卓 App / 浏览器输入地址 + 口令即可加入，无需服务器。")
         tip.setObjectName("sub"); tip.setWordWrap(True); v.addWidget(tip)
 
-        self.code_lbl = QLabel("----"); self.code_lbl.setObjectName("codebig")
-        self.code_lbl.setAlignment(Qt.AlignCenter)
-        v.addWidget(QLabel("房间口令", alignment=Qt.AlignCenter))
-        v.addWidget(self.code_lbl)
+        lenrow = QHBoxLayout(); lenrow.addWidget(QLabel("口令位数"))
+        self.code_len = QComboBox(); self.code_len.addItems(["4", "5", "6"])
+        lenrow.addWidget(self.code_len); lenrow.addStretch(1)
+        v.addLayout(lenrow)
 
+        self.host_btn = QPushButton("📡 开启房间"); self.host_btn.clicked.connect(self.toggle_host)
+        v.addWidget(self.host_btn)
+
+        self.room_info = QWidget(); ri = QVBoxLayout(self.room_info); ri.setContentsMargins(0, 0, 0, 0)
+        ri.setSpacing(8)
+        ri.addWidget(QLabel("房间口令", alignment=Qt.AlignCenter))
+        self.code_lbl = QLabel("----"); self.code_lbl.setObjectName("codebig")
+        self.code_lbl.setAlignment(Qt.AlignCenter); ri.addWidget(self.code_lbl)
         self.addr_lbl = QLabel("地址：-"); self.addr_lbl.setObjectName("addr")
         self.addr_lbl.setAlignment(Qt.AlignCenter); self.addr_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        v.addWidget(self.addr_lbl)
-
+        ri.addWidget(self.addr_lbl)
         self.qr_lbl = QLabel(); self.qr_lbl.setAlignment(Qt.AlignCenter)
-        self.qr_lbl.setMinimumHeight(190); v.addWidget(self.qr_lbl)
-
+        self.qr_lbl.setFixedHeight(150)   # 固定高度，避免被布局压缩导致与按钮重叠
+        self.qr_lbl.hide()
+        ri.addWidget(self.qr_lbl)
         row = QHBoxLayout()
         copy = QPushButton("复制地址"); copy.setObjectName("ghost"); copy.clicked.connect(self.copy_addr)
         openb = QPushButton("浏览器打开"); openb.setObjectName("gray"); openb.clicked.connect(self.open_browser)
         row.addWidget(copy); row.addWidget(openb)
-        v.addLayout(row)
-
-        lenrow = QHBoxLayout(); lenrow.addWidget(QLabel("口令位数"))
-        self.code_len = QComboBox(); self.code_len.addItems(["4", "5", "6"]); lenrow.addWidget(self.code_len)
-        v.addLayout(lenrow)
-
-        self.host_btn = QPushButton("开启房间"); self.host_btn.clicked.connect(self.toggle_host)
-        v.addWidget(self.host_btn)
+        ri.addLayout(row)
+        self.room_info.hide()   # 未开房间时不占位
+        v.addWidget(self.room_info)
+        v.addStretch(1)         # 剩余空白统一压到最底部
         return w
 
     def _build_guest_panel(self):
@@ -305,11 +435,16 @@ class MainWindow(QWidget):
         v.addWidget(self.guest_btn)
         hint = QLabel("提示：可用安卓端生成的二维码链接，口令会自动带入。")
         hint.setObjectName("sub"); hint.setWordWrap(True); v.addWidget(hint)
+        v.addStretch(1)
         return w
 
     # ---------- 主题 ----------
     def apply_theme(self):
         QApplication.instance().setStyleSheet(theme.DARK if self.dark else theme.LIGHT)
+        for i in range(self.dl_list.count()):
+            c = self.dl_list.itemAt(i).widget()
+            if isinstance(c, DownloadTaskCard):
+                c.set_dark(self.dark)
         if self.hub and self.room_on and self.mode == "host":
             self.render_qr()
 
@@ -332,17 +467,21 @@ class MainWindow(QWidget):
 
     # ---------- 模式切换 ----------
     def switch_mode(self, mode):
-        if self.room_on:
+        if self.room_on and mode != self.mode and mode != "download":
             QMessageBox.information(self, "提示", "请先关闭当前房间/退出后再切换模式。")
-            # 恢复按钮状态
-            self.tab_host.setChecked(self.mode == "host")
-            self.tab_guest.setChecked(self.mode == "guest")
+            for t, m in ((self.tab_dl, "download"), (self.tab_host, "host"), (self.tab_guest, "guest")):
+                t.setChecked(self.mode == m)
             return
+        # HTTP 下载可与房间共存（不冲突），但切换时仅换 UI
         self.mode = mode
+        self.tab_dl.setChecked(mode == "download")
         self.tab_host.setChecked(mode == "host")
         self.tab_guest.setChecked(mode == "guest")
-        self.stack.setCurrentIndex(0 if mode == "host" else 1)
-        self.set_status("未连接")
+        idx = {"download": 0, "host": 1, "guest": 2}[mode]
+        self.stack.setCurrentIndex(idx)
+        self.right_stack.setCurrentIndex(0 if mode == "download" else 1)
+        if mode != "download":
+            self.set_status("房间已开启" if self.room_on else "未连接")
 
     # ---------- 开房间（host） ----------
     def toggle_host(self):
@@ -360,6 +499,8 @@ class MainWindow(QWidget):
             return
         self.room_on = True
         self.mode = "host"
+        self.room_info.show()
+        self.qr_lbl.show()
         self.code_lbl.setText(self.hub.code)
         self.addr_lbl.setText(self.hub.url())
         self.host_btn.setText("关闭房间"); self.host_btn.setObjectName("red")
@@ -379,7 +520,7 @@ class MainWindow(QWidget):
             data = img.tobytes()
             w, h = img.size
             qimg = QImage(data, w, h, QImage.Format_RGB888)
-            self.qr_lbl.setPixmap(QPixmap.fromImage(qimg).scaled(180, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.qr_lbl.setPixmap(QPixmap.fromImage(qimg).scaled(144, 144, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         except Exception as e:
             self.qr_lbl.setText("二维码生成失败：" + str(e)[:40])
 
@@ -426,7 +567,8 @@ class MainWindow(QWidget):
         if self.mode == "host" and self.hub:
             self.hub.stop(); self.hub = None
             self.code_lbl.setText("----"); self.addr_lbl.setText("地址：-"); self.qr_lbl.clear()
-            self.host_btn.setText("开启房间")
+            self.qr_lbl.hide(); self.room_info.hide()
+            self.host_btn.setText("📡 开启房间")
             self.host_btn.setStyleSheet("")
         else:
             self.client = None
@@ -651,6 +793,73 @@ class MainWindow(QWidget):
             self.render_chat()
             self.toast("聊天显示已清空")
 
+    # ---------- HTTP 多线程下载 ----------
+    def start_download(self):
+        url = self.dl_url.text().strip()
+        if not url.lower().startswith(("http://", "https://")):
+            self.toast("请输入 http:// 或 https:// 开头的链接")
+            return
+        self.dl_btn.setEnabled(True)
+        # 先 probe 文件名/大小
+        try:
+            name, total, rng, final = http_dl.probe(url)
+        except Exception as e:
+            self.toast("无法连接：%s" % str(e)[:60])
+            return
+        default = os.path.join(os.path.expanduser("~"), "Downloads", name)
+        dest = QFileDialog.getSaveFileName(self, "保存到", default, "所有文件 (*.*)")[0]
+        if not dest:
+            return
+        threads = int(self.dl_threads.currentText())
+        card = DownloadTaskCard(dest, name, threads, self.dark)
+        self.dl_list.insertWidget(self.dl_list.count() - 1, card)
+        task = http_dl.Task(
+            url, dest, threads=threads,
+            on_progress=lambda d, t, s, st, c=card: self._on_dl_progress(c, d, t, s, st),
+            on_done=lambda ok, m, c=card: self._on_dl_done(c, ok, m),
+        )
+        card.task = task
+        self.dl_tasks.append(task)
+        task.start()
+        self.dl_url.clear()
+        self.toast("已开始下载：%s（%s，%d 线程）" % (name, L.fmt_size(total), task.threads if rng else 1))
+
+    def _on_dl_progress(self, card, done, total, speed, state):
+        card.update_progress(done, total, speed, state)
+        active = sum(1 for t in self.dl_tasks if t.state in ("下载中", "准备中", "暂停"))
+        self.dl_summary.setText("%d 个进行中" % active if active else "空闲")
+
+    def _on_dl_done(self, card, ok, message):
+        card.finish(ok, message)
+        active = sum(1 for t in self.dl_tasks if t.state in ("下载中", "准备中", "暂停"))
+        self.dl_summary.setText("%d 个进行中" % active if active else "空闲")
+
+    def pause_current_download(self):
+        active = [t for t in self.dl_tasks if t.state in ("下载中", "准备中")]
+        paused = [t for t in self.dl_tasks if t.state == "暂停"]
+        if active:
+            for t in active:
+                t.pause()
+            self.toast("已暂停 %d 个任务" % len(active))
+        elif paused:
+            for t in paused:
+                t.resume()
+            self.toast("已继续 %d 个任务" % len(paused))
+        else:
+            self.toast("当前没有进行中的下载任务")
+
+    def clear_finished_downloads(self):
+        removed = 0
+        for i in reversed(range(self.dl_list.count())):
+            item = self.dl_list.itemAt(i)
+            w = item.widget()
+            if w is None or not isinstance(w, DownloadTaskCard):
+                continue
+            if w.finished:
+                w.setParent(None); w.deleteLater(); removed += 1
+        self.dl_tasks = [t for t in self.dl_tasks if t.state in ("下载中", "准备中", "暂停")]
+        self.toast("已清除 %d 个任务" % removed)
+
     # ---------- 杂项 ----------
     def set_status(self, s):
         self.status.setText(s)
@@ -667,6 +876,13 @@ class MainWindow(QWidget):
             dlg.exec_()
             if not dlg.result_ok:
                 e.ignore(); return
+        # 取消进行中的下载（保留断点）
+        for t in self.dl_tasks:
+            if t.state in ("下载中", "准备中", "暂停"):
+                try:
+                    t.cancel()
+                except Exception:
+                    pass
         try:
             if self.hub:
                 self.hub.stop()
