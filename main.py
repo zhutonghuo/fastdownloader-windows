@@ -294,10 +294,12 @@ class MainWindow(QWidget):
         lv.addWidget(self.stack, 1)
         body.addWidget(left, 0)   # 左栏不强行拉伸，靠 minimumWidth 保证可读
 
-        # 右侧：三合一堆叠（下载任务 / 聊天）
+        # 右侧：三合一堆叠（下载任务 / 聊天 / 未连接占位）
         self.right_stack = QStackedWidget()
         self.right_stack.addWidget(self._build_download_tasks())
         self.right_stack.addWidget(self._build_chat_area())
+        self.right_stack.addWidget(self._build_idle_placeholder())
+        self.right_stack.setCurrentIndex(0)   # 默认 HTTP 下载模式：显示下载任务页
         body.addWidget(self.right_stack, 1)
         root.addLayout(body, 1)
 
@@ -381,6 +383,25 @@ class MainWindow(QWidget):
         cv.addLayout(tools)
         self.progress = QProgressBar(); self.progress.hide(); cv.addWidget(self.progress)
         return card
+
+    def _build_idle_placeholder(self):
+        """房间未开启/未加入时的占位页：把用不到的聊天区收起来"""
+        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(16, 0, 16, 16)
+        card = QFrame(); card.setObjectName("card")
+        cv = QVBoxLayout(card); cv.setContentsMargins(24, 30, 24, 30)
+        cv.setAlignment(Qt.AlignCenter)
+        icon = QLabel("💬"); icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet("font-size:64px;")
+        title = QLabel("聊天互传将在连接后开启"); title.setObjectName("h2")
+        title.setAlignment(Qt.AlignCenter)
+        self.idle_hint = QLabel("在左侧开启房间或加入房间，即可在这里聊天、收发文件。")
+        self.idle_hint.setObjectName("sub"); self.idle_hint.setWordWrap(True)
+        self.idle_hint.setAlignment(Qt.AlignCenter)
+        cv.addStretch(1); cv.addWidget(icon); cv.addSpacing(12)
+        cv.addWidget(title); cv.addSpacing(6); cv.addWidget(self.idle_hint); cv.addStretch(1)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        v.addWidget(card, 1)
+        return w
 
     def _build_host_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
@@ -479,8 +500,15 @@ class MainWindow(QWidget):
         self.tab_guest.setChecked(mode == "guest")
         idx = {"download": 0, "host": 1, "guest": 2}[mode]
         self.stack.setCurrentIndex(idx)
-        self.right_stack.setCurrentIndex(0 if mode == "download" else 1)
-        if mode != "download":
+        # 收起未用到的区域：下载->任务；房间模式且已连接->聊天；否则->占位引导
+        if mode == "download":
+            self.right_stack.setCurrentIndex(0)
+        else:
+            self.right_stack.setCurrentIndex(1 if self.room_on else 2)
+            self.idle_hint.setText(
+                "房间已连接，右侧聊天已就绪。" if self.room_on else
+                ("在左侧开启房间或加入房间，即可在这里聊天、收发文件。")
+            )
             self.set_status("房间已开启" if self.room_on else "未连接")
 
     # ---------- 开房间（host） ----------
@@ -506,8 +534,8 @@ class MainWindow(QWidget):
         self.host_btn.setText("关闭房间"); self.host_btn.setObjectName("red")
         self.host_btn.setStyleSheet("background:#fdeeee;color:#d64545;")
         self.render_qr()
+        self.right_stack.setCurrentIndex(1)   # 已连接：显示聊天区
         self.set_status("房间已开启 · %d 人" % self.peer_count())
-        # host 自己先发一条系统提示，便于确认可用
         self.msgs = []
         self.last_sig = ""
         self.render_chat()
@@ -556,6 +584,7 @@ class MainWindow(QWidget):
                 self.guest_btn.setText("退出房间"); self.guest_btn.setObjectName("red")
                 self.guest_btn.setStyleSheet("background:#fdeeee;color:#d64545;")
                 self.set_status("已加入 " + code)
+                QTimer.singleShot(0, lambda: self.right_stack.setCurrentIndex(1))  # 回到主线程切 UI
                 self.msgs = []; self.last_sig = ""; self.clear_ts = 0; self.seen_ts = 0
             else:
                 self.guest_btn.setText("加入房间")
@@ -576,6 +605,8 @@ class MainWindow(QWidget):
         self.room_on = False
         self.msgs = []; self.last_sig = ""; self.clear_ts = 0; self.seen_ts = 0
         self.set_status("未连接")
+        if self.mode != "download":
+            self.right_stack.setCurrentIndex(2)   # 收起聊天区，回到占位引导
         self.render_chat()
 
     # ---------- 轮询 ----------
