@@ -17,7 +17,7 @@ import mimetypes
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 # ---------------- 工具（对齐安卓 LanUtil / Fmt） ----------------
 
