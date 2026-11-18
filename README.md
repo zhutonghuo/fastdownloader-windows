@@ -13,6 +13,7 @@
 
 ## 功能
 
+- **HTTP 多线程高速下载**：输入 http/https 直链，2~32 线程 Range 分片并发，实时进度/速度，支持暂停/继续、取消、断点续传（`.part` 文件），服务器不支持 Range 时自动单线程
 - 开房间 / 加入房间（双向互通）
 - 微信式聊天：文本 + 文件气泡，自己靠右、他人靠左，带发送时间
 - 上传单个文件 / 整个文件夹（保留相对目录结构）
@@ -49,11 +50,18 @@ python build.py
 python test_protocol.py
 ```
 
+HTTP 下载引擎自检（本地限速服务器，13 项）：
+
+```bash
+python test_httpdl.py
+```
+
 ## 项目结构
 
 | 文件 | 说明 |
 | --- | --- |
-| `main.py` | PyQt5 主界面（开/加入房间、聊天、上传下载、预览、主题） |
+| `main.py` | PyQt5 主界面（HTTP 下载、开/加入房间、聊天、上传下载、预览、主题） |
+| `http_dl.py` | HTTP 多线程分片下载引擎（Range/断点续传/暂停/取消） |
 | `lan_core.py` | 协议核心：复刻安卓 LanHub 服务端 + LanClient 客户端 |
 | `bubble.py` | 聊天气泡自定义控件 |
 | `theme.py` | 现代 QSS 浅色/深色主题 |
@@ -63,4 +71,5 @@ python test_protocol.py
 
 ## 版本
 
+- v1.1：新增 HTTP 多线程高速下载（Range 分片/断点续传/暂停继续），界面重构适配多分辨率。
 - v1.0：首个 Windows 版，与安卓版 v1.12 互通。
