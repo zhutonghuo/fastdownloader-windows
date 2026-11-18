@@ -11,6 +11,7 @@ cmd = [
     "--onefile",
     "--windowed",
     "--name", "FastDownloader",
+    "--icon", os.path.join(HERE, "app.ico"),
     "--add-data", os.path.join(HERE, "assets", "lan.html") + os.pathsep + os.path.join("assets"),
     "--hidden-import", "PyQt5.QtMultimedia",
     "--hidden-import", "PyQt5.QtMultimediaWidgets",
@@ -19,7 +20,6 @@ cmd = [
     "--exclude-module", "tkinter",
     "--exclude-module", "matplotlib",
     "--exclude-module", "numpy",
-    "--clean",
     "--noconfirm",
 ]
 if os.path.exists(UPX):
