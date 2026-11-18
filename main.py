@@ -174,7 +174,8 @@ class DownloadTaskCard(QFrame):
         meta.addWidget(self.speed_lbl)
         meta.addStretch(1)
         self.open_btn = QPushButton("打开文件夹")
-        self.open_btn.setObjectName("small"); self.open_btn.setProperty("cls", "ghost")
+        self.open_btn.setObjectName("small")
+        self.open_btn.setStyleSheet("padding:5px 11px;font-size:12px;border-radius:7px;background:#eaf1ff;color:#2f6fed;")
         self.open_btn.clicked.connect(self.open_folder)
         self.open_btn.hide()
         meta.addWidget(self.open_btn)
@@ -266,8 +267,9 @@ class MainWindow(QWidget):
         root.addWidget(titlebar)
         self.titlebar = titlebar
 
-        # 顶部主模式切换（贯穿整宽，避免左栏 dropdown 拥挤）
-        modetabs = QHBoxLayout(); modetabs.setContentsMargins(16, 0, 16, 8); modetabs.setSpacing(8)
+        # 顶部主模式切换（限宽居中，与内容区对齐）
+        tabbar = QWidget(); tabbar.setMaximumWidth(1180)
+        modetabs = QHBoxLayout(tabbar); modetabs.setContentsMargins(16, 0, 16, 8); modetabs.setSpacing(8)
         self.tab_dl = QPushButton("⬇ HTTP 高速下载"); self.tab_dl.setCheckable(True); self.tab_dl.setChecked(True)
         self.tab_host = QPushButton("📡 开房间"); self.tab_host.setCheckable(True)
         self.tab_guest = QPushButton("🔗 加入房间"); self.tab_guest.setCheckable(True)
@@ -277,14 +279,19 @@ class MainWindow(QWidget):
         self.tab_host.clicked.connect(lambda: self.switch_mode("host"))
         self.tab_guest.clicked.connect(lambda: self.switch_mode("guest"))
         modetabs.addStretch(1)
-        root.addLayout(modetabs)
+        tabbar_outer = QHBoxLayout(); tabbar_outer.setContentsMargins(0, 0, 0, 0)
+        tabbar_outer.addStretch(1); tabbar_outer.addWidget(tabbar, 0); tabbar_outer.addStretch(1)
+        root.addLayout(tabbar_outer)
 
-        # 主内容区：左侧控制面板（自适应宽度）+ 右侧功能区
-        body = QHBoxLayout(); body.setContentsMargins(16, 0, 16, 16); body.setSpacing(14)
+        # 主内容区：限宽居中，避免宽屏上左右拉散、一大片空白
+        content = QWidget()
+        content.setMaximumWidth(1180)
+        content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        body = QHBoxLayout(content); body.setContentsMargins(16, 0, 16, 16); body.setSpacing(14)
 
         left = QFrame(); left.setObjectName("card")
-        left.setMinimumWidth(300)
-        left.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        left.setFixedWidth(330)
+        left.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         lv = QVBoxLayout(left); lv.setContentsMargins(16, 16, 16, 16); lv.setSpacing(9)
 
         self.stack = QStackedWidget()  # 三个模式面板：download / host / guest
@@ -301,7 +308,10 @@ class MainWindow(QWidget):
         self.right_stack.addWidget(self._build_idle_placeholder())
         self.right_stack.setCurrentIndex(0)   # 默认 HTTP 下载模式：显示下载任务页
         body.addWidget(self.right_stack, 1)
-        root.addLayout(body, 1)
+
+        outer = QHBoxLayout(); outer.setContentsMargins(0, 0, 0, 0)
+        outer.addStretch(1); outer.addWidget(content, 0); outer.addStretch(1)
+        root.addLayout(outer, 1)
 
     def _build_download_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
@@ -337,13 +347,31 @@ class MainWindow(QWidget):
         clr = QPushButton("清除已完成"); clr.setObjectName("small"); clr.clicked.connect(self.clear_finished_downloads)
         h.addWidget(clr)
         cv.addLayout(h)
+
+        self.dl_body = QStackedWidget()
+
+        # 页 0：空状态引导
+        empty = QWidget(); ev = QVBoxLayout(empty); ev.setContentsMargins(24, 30, 24, 30)
+        ev.setAlignment(Qt.AlignCenter)
+        eicon = QLabel("⬇"); eicon.setAlignment(Qt.AlignCenter); eicon.setStyleSheet("font-size:56px;color:#9fb4d8;")
+        etitle = QLabel("还没有下载任务"); etitle.setObjectName("h2"); etitle.setAlignment(Qt.AlignCenter)
+        ehint = QLabel("在左侧粘贴 HTTP / HTTPS 链接，选择线程数后点击「开始下载」\n任务进度、速度与剩余时间会显示在这里。")
+        ehint.setObjectName("sub"); ehint.setWordWrap(True); ehint.setAlignment(Qt.AlignCenter)
+        ev.addStretch(1); ev.addWidget(eicon); ev.addSpacing(14)
+        ev.addWidget(etitle); ev.addSpacing(8); ev.addWidget(ehint); ev.addStretch(1)
+        self.dl_body.addWidget(empty)
+
+        # 页 1：任务列表
         self.dl_scroll = QScrollArea(); self.dl_scroll.setWidgetResizable(True)
         self.dl_box = QWidget(); self.dl_list = QVBoxLayout(self.dl_box)
         self.dl_list.setContentsMargins(4, 4, 4, 4); self.dl_list.setSpacing(8)
         self.dl_list.addStretch(1)
         self.dl_scroll.setWidget(self.dl_box)
-        cv.addWidget(self.dl_scroll, 1)
-        v.addWidget(card)
+        self.dl_body.addWidget(self.dl_scroll)
+        self.dl_body.setCurrentIndex(0)
+        cv.addWidget(self.dl_body, 1)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        v.addWidget(card, 1)
         return w
 
     def _build_chat_area(self):
@@ -851,6 +879,7 @@ class MainWindow(QWidget):
         )
         card.task = task
         self.dl_tasks.append(task)
+        self.dl_body.setCurrentIndex(1)   # 有任务：切到任务列表
         task.start()
         self.dl_url.clear()
         self.toast("已开始下载：%s（%s，%d 线程）" % (name, L.fmt_size(total), task.threads if rng else 1))
@@ -889,6 +918,10 @@ class MainWindow(QWidget):
             if w.finished:
                 w.setParent(None); w.deleteLater(); removed += 1
         self.dl_tasks = [t for t in self.dl_tasks if t.state in ("下载中", "准备中", "暂停")]
+        # 没有可见任务卡片时切回引导页
+        has_card = any(isinstance(self.dl_list.itemAt(i).widget(), DownloadTaskCard)
+                       for i in range(self.dl_list.count()))
+        self.dl_body.setCurrentIndex(1 if has_card else 0)
         self.toast("已清除 %d 个任务" % removed)
 
     # ---------- 杂项 ----------
@@ -921,9 +954,46 @@ class MainWindow(QWidget):
             pass
         super().closeEvent(e)
 
+def _setup_dpi():
+    """高 DPI 适配：必须在创建 QApplication 之前调用。
+    系统已缩放（>=125%）时交给 Qt 自动处理；4K 屏但系统仍是 100% 时强制放大，
+    否则字小如蚂蚁、内容挤在左上角。"""
+    try:
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor V2
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+        sw = ctypes.windll.user32.GetSystemMetrics(0)       # 主屏物理宽(px)
+        hdc = ctypes.windll.user32.GetDC(0)
+        dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)    # LOGPIXELSX
+        ctypes.windll.user32.ReleaseDC(0, hdc)
+        ratio = dpi / 96.0
+        # 系统已在缩放 → Qt 自动处理即可；4K@100% → 强制放大到 ~1.6x
+        if sw >= 3000 and ratio < 1.25:
+            os.environ.setdefault("QT_SCALE_FACTOR", "1.6")
+        elif ratio > 1.01:
+            os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    except Exception:
+        pass
+
+
 def main():
+    _setup_dpi()
     app = QApplication(sys.argv)
     app.setApplicationName("极速下载器 Windows")
+    # 基准字号兜底（Qt 默认 9pt 偏小）
+    f = app.font()
+    if f.pointSize() < 10:
+        f.setPointSize(10)
+    app.setFont(f)
     w = MainWindow()
     w.show()
     sys.exit(app.exec_())
