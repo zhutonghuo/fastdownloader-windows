@@ -575,7 +575,7 @@ class MainWindow(QWidget):
             img = img.convert("RGB")
             data = img.tobytes()
             w, h = img.size
-            qimg = QImage(data, w, h, QImage.Format_RGB888)
+            qimg = QImage(data, w, h, w * 3, QImage.Format_RGB888)
             self.qr_lbl.setPixmap(QPixmap.fromImage(qimg).scaled(144, 144, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         except Exception as e:
             self.qr_lbl.setText("二维码生成失败：" + str(e)[:40])
