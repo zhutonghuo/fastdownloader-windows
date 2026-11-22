@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import re
+import os
+import traceback
 from PyQt5.QtCore import QUrl, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtNetwork import QNetworkCookie
@@ -22,11 +24,22 @@ LOGIN_URLS = {
 }
 
 
+def _log(msg):
+    try:
+        p = os.path.join(os.path.expanduser("~"), ".jisudownloader", "weblogin.log")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(str(msg) + "\n")
+    except Exception:
+        pass
+
+
 class WebLoginDialog(QDialog):
     cookies_ready = pyqtSignal(str)
 
     def __init__(self, platform, parent=None, dark=False):
         super().__init__(parent)
+        _log("WebLoginDialog init " + platform)
         self.platform = platform
         self._cookies = {}
         self.setWindowTitle("网盘登录 · " + platform)
@@ -48,13 +61,12 @@ class WebLoginDialog(QDialog):
         v.addWidget(bar)
 
         self.view = QWebEngineView()
-        self.profile = QWebEngineProfile("jisu-pan-%s" % platform, self)
+        self.profile = QWebEngineProfile.defaultProfile()
         self.profile.setHttpUserAgent(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-        page = QWebEnginePage(self.profile, self.view)
-        self.view.setPage(page)
         v.addWidget(self.view, 1)
+        _log("profile ready")
 
         hint = QLabel("提示：在网页里正常登录（扫码 / 账号密码均可）。登录后点右上角「完成登录」，程序会自动提取该站 Cookie。")
         hint.setObjectName("sub"); hint.setWordWrap(True)
@@ -64,8 +76,13 @@ class WebLoginDialog(QDialog):
         cs = self.profile.cookieStore()
         cs.cookieAdded.connect(self._on_cookie)
         self.view.urlChanged.connect(self._on_url)
+        _log("cookie store connected")
 
-        self.view.load(QUrl(LOGIN_URLS.get(platform, "https://www.baidu.com")))
+        try:
+            self.view.load(QUrl(LOGIN_URLS.get(platform, "https://www.baidu.com")))
+            _log("load called")
+        except Exception:
+            _log("load ERR " + traceback.format_exc())
 
     def _on_cookie(self, cookie):
         try:
