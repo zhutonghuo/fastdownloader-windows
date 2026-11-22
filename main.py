@@ -7,6 +7,7 @@
 import os
 import sys
 import json
+import traceback
 import time
 import uuid
 import threading
@@ -906,14 +907,21 @@ class MainWindow(QWidget):
             import pan
             share = pan.parse_share(text)
         platform = share["platform"] if share else "quark"
-        dlg = web_login.WebLoginDialog(platform, self, self.dark)
-        def on_cookies(cookie_str):
-            self.pan_cookie.setText(cookie_str)
-            self.toast("已提取 %s 的登录状态" % platform)
-        dlg.cookies_ready.connect(on_cookies)
         try:
+            dlg = web_login.WebLoginDialog(platform, self, self.dark)
+            def on_cookies(cookie_str):
+                self.pan_cookie.setText(cookie_str)
+                self.toast("已提取 %s 的登录状态" % platform)
+            dlg.cookies_ready.connect(on_cookies)
             dlg.exec_()
         except Exception as e:
+            import traceback
+            try:
+                lg = os.path.join(os.path.expanduser("~"), ".jisudownloader", "weblogin.log")
+                os.makedirs(os.path.dirname(lg), exist_ok=True)
+                open(lg, "a", encoding="utf-8").write("dialog ERR " + traceback.format_exc())
+            except Exception:
+                pass
             QMessageBox.warning(self, "登录窗口出错", str(e)[:150])
 
     def parse_pan(self):
@@ -1113,6 +1121,16 @@ def _setup_dpi():
     """高 DPI 适配：必须在创建 QApplication 之前调用。
     系统已缩放（>=125%）时交给 Qt 自动处理；4K 屏但系统仍是 100% 时强制放大，
     否则字小如蚂蚁、内容挤在左上角。"""
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        os.environ.setdefault("QTWEBENGINE_RESOURCES_PATH", meipass)
+        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu")
+        cache = os.path.join(os.path.expanduser("~"), ".jisudownloader", "webcache")
+        try:
+            os.makedirs(cache, exist_ok=True)
+            os.environ.setdefault("QTWEBENGINE_CACHE_PATH", cache)
+        except Exception:
+            pass
     try:
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
@@ -1152,6 +1170,20 @@ def main():
     app.setFont(f)
     w = MainWindow()
     w.show()
+    if "--selftest-login" in sys.argv:
+        def _selftest():
+            try:
+                import web_login
+                dlg = web_login.WebLoginDialog("quark", w, w.dark)
+                dlg.show()
+                web_login._log("SELFTEST dialog shown")
+                QTimer.singleShot(4000, app.quit)
+            except Exception:
+                lg = os.path.join(os.path.expanduser("~"), ".jisudownloader", "weblogin.log")
+                os.makedirs(os.path.dirname(lg), exist_ok=True)
+                open(lg, "a", encoding="utf-8").write("SELFTEST ERR " + traceback.format_exc())
+                app.quit()
+        QTimer.singleShot(500, _selftest)
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
