@@ -18,6 +18,7 @@ cmd = [
     "--hidden-import", "qrcode",
     "--hidden-import", "PIL",
     "--hidden-import", "pan",
+    "--hidden-import", "myfiles",
     "--hidden-import", "web_login",
     "--hidden-import", "PyQt5.QtWebEngineWidgets",
     "--hidden-import", "PyQt5.QtWebEngineCore",
