@@ -299,6 +299,90 @@ def resolve_baidu(share, cookies=None):
     return out
 
 
+def list_my_files(platform, cookies, fid="0"):
+    """列出登录账号自己网盘里的文件/文件夹。
+    返回 [{"name","size","is_dir","fid","path","platform"}]，fid 用于进入子目录。"""
+    if not cookies:
+        raise ResolveError("请先点「网页登录」获取 Cookie")
+    if platform in ("quark", "uc"):
+        base = "https://drive-pc.quark.cn/1/clouddrive" if platform == "quark" else "https://drive.uc.cn/1/clouddrive"
+        ref = "https://pan.quark.cn/" if platform == "quark" else "https://drive.uc.cn/"
+        hdr = _cookie_headers(cookies, ref)
+        params = urllib.parse.urlencode({"pr": "ucpro", "fr": "pc", "pdir_fid": fid or "0",
+            "_page": "1", "_size": "200", "_fetch_total": "1", "_fetch_sub_dirs": "0",
+            "_sort": "file_type:asc,updated_at:desc"})
+        try:
+            obj, _ = _http(base + "/file/sort?" + params, headers=hdr, timeout=25)
+        except Exception as e:
+            raise ResolveError("%s 文件列表失败：%s" % (platform, str(e)[:80]))
+        if obj.get("code") not in (0, None):
+            raise ResolveError(obj.get("message") or "%s 返回错误 %s" % (platform, obj.get("code")))
+        out = []
+        for it in obj.get("data", {}).get("list", []):
+            out.append({"name": it.get("file_name", "file"), "size": int(it.get("size", 0)),
+                        "is_dir": bool(it.get("dir")), "fid": it.get("fid", ""),
+                        "path": fid, "platform": platform, "headers": hdr})
+        return out
+    if platform == "baidu":
+        hdr = _cookie_headers(cookies, "https://pan.baidu.com/")
+        try:
+            obj, _ = _http("https://pan.baidu.com/api/list?" + urllib.parse.urlencode(
+                {"dir": fid or "/", "page": "1", "num": "1000", "order": "name", "desc": "0"}),
+                headers=hdr, timeout=25)
+        except Exception as e:
+            raise ResolveError("百度文件列表失败：%s" % str(e)[:80])
+        if obj.get("errno") not in (0, None):
+            raise ResolveError("百度返回错误 %s（Cookie 可能无效）" % obj.get("errno"))
+        out = []
+        for it in obj.get("list", []):
+            out.append({"name": it.get("filename", "file"), "size": int(it.get("size", 0)),
+                        "is_dir": int(it.get("is_dir", 0)) == 1, "fid": str(it.get("fs_id", "")),
+                        "path": it.get("path", fid), "platform": "baidu", "headers": hdr})
+        return out
+    raise ResolveError("%s 暂不支持浏览账号文件，当前可用：夸克 / UC / 百度" % PLATFORMS.get(platform, platform))
+
+
+def myfile_direct(files, cookies):
+    """把账号里的文件换成下载直链。返回 [{name,size,url,headers}]。"""
+    if not files:
+        return []
+    platform = files[0].get("platform", "quark")
+    if platform in ("quark", "uc"):
+        base = "https://drive-pc.quark.cn/1/clouddrive" if platform == "quark" else "https://drive.uc.cn/1/clouddrive"
+        ref = "https://pan.quark.cn/" if platform == "quark" else "https://drive.uc.cn/"
+        hdr = _cookie_headers(cookies, ref)
+        hdr["Content-Type"] = "application/json"
+        body = json.dumps({"fids": [f["fid"] for f in files]}).encode("utf-8")
+        req = urllib.request.Request(base + "/file/download?" + urllib.parse.urlencode(
+            {"pr": "ucpro", "fr": "pc"}), data=body, headers=hdr, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=25) as r:
+                obj = json.load(r)
+        except Exception as e:
+            raise ResolveError("%s 取直链失败：%s" % (platform, str(e)[:80]))
+        if obj.get("code") not in (0, None):
+            raise ResolveError(obj.get("message") or "取直链失败")
+        data = obj.get("data") or []
+        url_map = {}
+        for d in data:
+            if isinstance(d, dict):
+                url_map[d.get("fid", "")] = d.get("download_url", "")
+            elif isinstance(d, str):
+                url_map.setdefault("", d)
+        out = []
+        urls = [url_map.get(f.get("fid", "")) or (data[i].get("download_url") if i < len(data) and isinstance(data[i], dict) else None)
+                for i, f in enumerate(files)]
+        for f, u in zip(files, urls):
+            if u:
+                out.append({"name": f["name"], "size": f.get("size", 0), "url": u, "headers": dict(hdr)})
+        if not out:
+            raise ResolveError("未取到下载直链（文件可能需会员或已失效）")
+        return out
+    if platform == "baidu":
+        raise ResolveError("百度账号文件的直链接口适配中，当前可用：夸克 / UC")
+    raise ResolveError("该平台暂不支持账号文件下载")
+
+
 def resolve(share, cookies=None, token=None):
     p = share["platform"]
     if p == "github":
