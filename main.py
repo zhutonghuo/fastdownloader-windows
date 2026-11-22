@@ -1158,7 +1158,7 @@ def _setup_dpi():
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
         os.environ.setdefault("QTWEBENGINE_RESOURCES_PATH", meipass)
-        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu")
+        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")
         cache = os.path.join(os.path.expanduser("~"), ".jisudownloader", "webcache")
         try:
             os.makedirs(cache, exist_ok=True)
@@ -1204,6 +1204,13 @@ def main():
     app.setFont(f)
     w = MainWindow()
     w.show()
+    def _warm():
+        try:
+            import web_login
+            web_login.warm_up()
+        except Exception:
+            pass
+    QTimer.singleShot(800, _warm)
     if "--selftest-login" in sys.argv:
         def _selftest():
             try:
