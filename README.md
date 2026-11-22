@@ -71,6 +71,7 @@ python test_httpdl.py
 
 ## 版本
 
+- v1.51：修复 WebEngine 登录舱初始化顺序错误（QtWebEngineWidgets 必须在 QApplication 之前导入）。
 - v1.5：内置 WebView 登录舱（自动提取 Cookie + 手动完成备选）；网盘取链支持夸克/UC/百度。
 - v1.4：新增网盘下载（11 家平台链接识别 + GitHub/蓝奏云解析），高速引擎注入云析式慢连接抢占、Range 容忍与严格写入校验。
 - v1.31：修复房间二维码扭曲（QImage 缺少 bytesPerLine 导致每行错位）。
