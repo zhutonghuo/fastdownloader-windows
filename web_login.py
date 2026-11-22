@@ -34,6 +34,22 @@ def _log(msg):
         pass
 
 
+_warm_view = None
+
+
+def warm_up():
+    global _warm_view
+    if _warm_view is not None:
+        return
+    try:
+        _warm_view = QWebEngineView()
+        _warm_view.setFixedSize(1, 1)
+        _warm_view.load(QUrl("about:blank"))
+        _log("warmup done")
+    except Exception:
+        _log("warmup ERR " + traceback.format_exc())
+
+
 class WebLoginDialog(QDialog):
     cookies_ready = pyqtSignal(str)
 
@@ -51,9 +67,9 @@ class WebLoginDialog(QDialog):
 
         bar = QFrame(); bar.setFixedHeight(46)
         bl = QHBoxLayout(bar); bl.setContentsMargins(14, 0, 12, 0)
-        title = QLabel("登录 %s 后点击「完成登录」" % platform)
-        title.setStyleSheet("font-size:14px;font-weight:700;")
-        bl.addWidget(title); bl.addStretch(1)
+        self.title_lbl = QLabel("登录 %s · 正在加载…" % platform)
+        self.title_lbl.setStyleSheet("font-size:14px;font-weight:700;")
+        bl.addWidget(self.title_lbl); bl.addStretch(1)
         done = QPushButton("完成登录"); done.setObjectName("primary")
         done.clicked.connect(self._finish); bl.addWidget(done)
         cancel = QPushButton("取消"); cancel.setObjectName("gray")
@@ -76,6 +92,8 @@ class WebLoginDialog(QDialog):
         cs = self.profile.cookieStore()
         cs.cookieAdded.connect(self._on_cookie)
         self.view.urlChanged.connect(self._on_url)
+        self.view.loadProgress.connect(self._on_progress)
+        self.view.loadFinished.connect(self._on_loaded)
         _log("cookie store connected")
 
         try:
@@ -83,6 +101,13 @@ class WebLoginDialog(QDialog):
             _log("load called")
         except Exception:
             _log("load ERR " + traceback.format_exc())
+
+    def _on_progress(self, pct):
+        self.title_lbl.setText("登录 %s · 加载中 %d%%" % (self.platform, pct))
+
+    def _on_loaded(self, ok):
+        self.title_lbl.setText("登录 %s · 完成后点「完成登录」" % self.platform)
+        _log("load finished ok=%s" % ok)
 
     def _on_cookie(self, cookie):
         try:
