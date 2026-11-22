@@ -350,6 +350,8 @@ class MainWindow(QWidget):
         crow.addStretch(1)
         self.pan_login_btn = QPushButton("网页登录"); self.pan_login_btn.setObjectName("small")
         self.pan_login_btn.clicked.connect(self.open_web_login); crow.addWidget(self.pan_login_btn)
+        self.pan_myfiles_btn = QPushButton("我的文件"); self.pan_myfiles_btn.setObjectName("small")
+        self.pan_myfiles_btn.clicked.connect(self.open_my_files); crow.addWidget(self.pan_myfiles_btn)
         v.addLayout(crow)
         self.pan_cookie = QLineEdit(); self.pan_cookie.setPlaceholderText("登录后自动填入，或手动粘贴 Cookie；GitHub 可填 Token")
         self.pan_cookie.setEchoMode(QLineEdit.Password); v.addWidget(self.pan_cookie)
@@ -926,6 +928,60 @@ class MainWindow(QWidget):
         label, placeholder = hints.get(pid, ("已选平台：自动识别（粘贴链接后自动判断）", "https://pan.quark.cn/s/xxxx 提取码: abcd"))
         self.pan_platform.setText(label)
         self.pan_url.setPlaceholderText(placeholder)
+
+    def open_my_files(self):
+        import pan
+        pid = self.pan_platform_combo.currentData()
+        if pid in (None, "github"):
+            QMessageBox.information(self, "提示", "请先在上方选择网盘平台（夸克 / UC / 百度）")
+            return
+        cookies = self.pan_cookie.text().strip()
+        if not cookies:
+            QMessageBox.information(self, "需要先登录", "请先点「网页登录」登录 %s，或手动粘贴 Cookie。" % pan.PLATFORMS.get(pid, pid))
+            return
+        try:
+            import myfiles
+            dlg = myfiles.MyFilesDialog(pid, cookies, self, self.dark)
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            files = dlg.result_files()
+            if not files:
+                return
+            self._enqueue_pan_direct(files, cookies)
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", str(e)[:150])
+
+    def _enqueue_pan_direct(self, files, cookies=None):
+        import http_dl
+        n = 0
+        for f in files:
+            url = f.get("url", "")
+            if not url:
+                continue
+            headers = dict(f.get("headers") or {})
+            if cookies:
+                headers["Cookie"] = cookies
+            try:
+                name, total, rng, final = http_dl.probe(url, headers=headers)
+            except Exception as e:
+                QMessageBox.warning(self, "取链失败", "%s：%s" % (f.get("name", "文件"), str(e)[:100]))
+                continue
+            default = os.path.join(os.path.expanduser("~"), "Downloads", f.get("name") or name)
+            dest = QFileDialog.getSaveFileName(self, "保存到", default, "所有文件 (*.*)")[0]
+            if not dest:
+                continue
+            card = DownloadTaskCard(dest, f.get("name") or name, self.threads_for_pan(), self.dark)
+            self.dl_list.insertWidget(self.dl_list.count() - 1, card)
+            task = http_dl.Task(url, dest, threads=self.threads_for_pan(), headers=headers,
+                on_progress=lambda d, t, s, st, c=card: self._on_dl_progress(c, d, t, s, st),
+                on_done=lambda ok, m, c=card: self._on_dl_done(c, ok, m))
+            card.task = task
+            self.dl_tasks.append(task)
+            self.dl_body.setCurrentIndex(1)
+            task.start()
+            n += 1
+        self.switch_mode("download")
+        self.toast("已开始 %d 个下载任务" % n)
 
     def open_web_login(self):
         try:
