@@ -35,7 +35,7 @@ PATTERNS = [
 GITHUB_RE = re.compile(r"github\.com/([^/]+)/([^/]+)(?:/(?:blob|tree)/(.+))?", re.I)
 
 
-def parse_share(text):
+def parse_share(text, force_platform=None):
     text = (text or "").strip()
     m = URL_RE.search(text)
     if not m:
@@ -46,6 +46,19 @@ def parse_share(text):
     if not code:
         tp = PWD_TEXT_RE.search(text)
         code = tp.group(1) if tp else None
+    if force_platform and force_platform != "github":
+        for platform, pat in PATTERNS:
+            if platform != force_platform:
+                continue
+            hit = pat.search(url)
+            if hit:
+                sid = hit.group(1)
+                if platform == "baidu":
+                    sid = sid[1:]
+                return {"platform": platform, "platform_name": PLATFORMS.get(platform, platform),
+                        "share_id": sid, "pwd": code, "url": url}
+        return {"platform": force_platform, "platform_name": PLATFORMS.get(force_platform, force_platform),
+                "share_id": url.rstrip("/").split("/")[-1].split("?")[0], "pwd": code, "url": url}
     for platform, pat in PATTERNS:
         hit = pat.search(url)
         if hit:
@@ -177,7 +190,7 @@ def resolve_quark(share, cookies=None):
     body = json.dumps({"pwd_id": sid, "passcode": pwd}).encode("utf-8")
     req = urllib.request.Request(base + "/token?pr=ucpro&fr=pc", data=body, headers=hdr, method="POST")
     try:
-        with _u.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=20) as r:
             tok = json.load(r)
     except Exception as e:
         raise ResolveError("夸克取凭证失败：%s" % str(e)[:80])
