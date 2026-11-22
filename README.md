@@ -71,6 +71,7 @@ python test_httpdl.py
 
 ## 版本
 
+- v1.6：网盘下载改为「下拉框选平台」（11 家+自动识别），修复夸克解析未定义变量崩溃。
 - v1.52：修复打包版点击网页登录闪退（WebEngine 资源路径/缓存目录/异常兜底）。
 - v1.51：修复 WebEngine 登录舱初始化顺序错误（QtWebEngineWidgets 必须在 QApplication 之前导入）。
 - v1.5：内置 WebView 登录舱（自动提取 Cookie + 手动完成备选）；网盘取链支持夸克/UC/百度。
