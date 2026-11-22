@@ -321,14 +321,25 @@ class MainWindow(QWidget):
 
     def _build_pan_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(9)
-        tip = QLabel("粘贴网盘分享链接，自动识别平台并列出文件，选中的文件交给高速引擎下载。")
+        tip = QLabel("先选网盘平台，再粘贴分享链接解析文件，选中后交给高速引擎下载。")
         tip.setObjectName("sub"); tip.setWordWrap(True); v.addWidget(tip)
+
+        prow = QHBoxLayout(); prow.addWidget(QLabel("网盘平台"))
+        self.pan_platform_combo = QComboBox()
+        self.pan_platform_combo.addItem("自动识别", None)
+        for _pid, _pname in [("quark", "夸克网盘"), ("uc", "UC网盘"), ("baidu", "百度网盘"),
+                             ("xunlei", "迅雷网盘"), ("c139", "139和彩云"), ("pan123", "123云盘"),
+                             ("pan115", "115网盘"), ("guangya", "光鸭云盘"),
+                             ("ilanzou", "蓝奏云优享"), ("lanzou", "蓝奏云"), ("github", "GitHub")]:
+            self.pan_platform_combo.addItem(_pname, _pid)
+        self.pan_platform_combo.currentIndexChanged.connect(self._on_pan_platform_changed)
+        prow.addWidget(self.pan_platform_combo, 1); v.addLayout(prow)
 
         v.addWidget(QLabel("分享链接（可整段粘贴，自动提取提取码）"))
         self.pan_url = QLineEdit(); self.pan_url.setPlaceholderText("https://pan.quark.cn/s/xxxx 提取码: abcd")
         self.pan_url.setMinimumHeight(38); v.addWidget(self.pan_url)
 
-        self.pan_platform = QLabel("平台：等待识别…"); self.pan_platform.setObjectName("sub")
+        self.pan_platform = QLabel("已选平台：自动识别（粘贴链接后自动判断）"); self.pan_platform.setObjectName("sub")
         v.addWidget(self.pan_platform)
 
         self.pan_parse_btn = QPushButton("解析文件列表"); self.pan_parse_btn.clicked.connect(self.parse_pan)
@@ -895,18 +906,40 @@ class MainWindow(QWidget):
             self.toast("聊天显示已清空")
 
     # ---------- 网盘下载 ----------
+    def _on_pan_platform_changed(self):
+        if not hasattr(self, "pan_url"):
+            return
+        pid = self.pan_platform_combo.currentData()
+        hints = {
+            "quark": ("已选平台：夸克网盘", "https://pan.quark.cn/s/xxxx 提取码: abcd"),
+            "uc": ("已选平台：UC网盘", "https://drive.uc.cn/s/xxxx 密码: abcd"),
+            "baidu": ("已选平台：百度网盘", "https://pan.baidu.com/s/1xxxx 提取码: abcd"),
+            "xunlei": ("已选平台：迅雷网盘", "https://pan.xunlei.com/s/xxxx?pwd=abcd"),
+            "c139": ("已选平台：139和彩云", "https://yun.139.com/shareweb/#/w/i/xxxx 提取码 abcd"),
+            "pan123": ("已选平台：123云盘", "https://www.123pan.com/s/xxxx-xxxx"),
+            "pan115": ("已选平台：115网盘", "https://115.com/s/swxxxxx?password=abcd"),
+            "guangya": ("已选平台：光鸭云盘", "https://www.guangyapan.com/s/xxxx"),
+            "ilanzou": ("已选平台：蓝奏云优享", "https://www.ilanzou.com/s/xxxx"),
+            "lanzou": ("已选平台：蓝奏云", "https://www.lanzoui.com/xxxx"),
+            "github": ("已选平台：GitHub", "https://github.com/owner/repo 或 .../blob/main/file.zip"),
+        }
+        label, placeholder = hints.get(pid, ("已选平台：自动识别（粘贴链接后自动判断）", "https://pan.quark.cn/s/xxxx 提取码: abcd"))
+        self.pan_platform.setText(label)
+        self.pan_url.setPlaceholderText(placeholder)
+
     def open_web_login(self):
         try:
             import web_login
         except Exception as e:
             QMessageBox.warning(self, "登录舱不可用", "WebEngine 组件加载失败：%s" % str(e)[:100])
             return
+        platform = self.pan_platform_combo.currentData() or "quark"
         text = self.pan_url.text().strip()
-        share = None
         if text:
             import pan
             share = pan.parse_share(text)
-        platform = share["platform"] if share else "quark"
+            if share:
+                platform = share["platform"]
         try:
             dlg = web_login.WebLoginDialog(platform, self, self.dark)
             def on_cookies(cookie_str):
@@ -930,12 +963,13 @@ class MainWindow(QWidget):
         if not text:
             self.toast("请先粘贴网盘分享链接")
             return
-        share = pan.parse_share(text)
+        picked = self.pan_platform_combo.currentData()
+        share = pan.parse_share(text, force_platform=picked)
         if not share:
             self.pan_platform.setText("平台：未识别（检查链接格式）")
             self.toast("未识别的网盘链接")
             return
-        self.pan_platform.setText("平台：%s · %s" % (share["platform_name"], share["share_id"][:16]))
+        self.pan_platform.setText("平台：%s · %s" % (share.get("platform_name", ""), share["share_id"][:16]))
         self.pan_parse_btn.setEnabled(False)
         self.pan_parse_btn.setText("解析中…")
 
