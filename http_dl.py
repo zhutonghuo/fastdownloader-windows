@@ -12,8 +12,10 @@ import urllib.error
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) FastDownloader/1.0"
 
-def _headers(url, timeout=15):
-    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": UA})
+def _headers(url, timeout=15, extra=None):
+    h = {"User-Agent": UA}
+    h.update(extra or {})
+    req = urllib.request.Request(url, method="HEAD", headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return dict(r.headers), r.geturl()
 
@@ -33,12 +35,13 @@ def _filename(url, headers, final_url=None):
 
 class Task:
     """一个下载任务"""
-    def __init__(self, url, save_path, threads=8, on_progress=None, on_done=None):
+    def __init__(self, url, save_path, threads=8, on_progress=None, on_done=None, headers=None):
         self.url = url
         self.save_path = save_path
         self.threads = max(1, min(32, int(threads)))
         self.on_progress = on_progress   # cb(done_bytes, total, speed_bps, state)
         self.on_done = on_done           # cb(ok, message)
+        self.headers = dict(headers or {})
 
         self.total = 0
         self.done = 0
@@ -53,6 +56,12 @@ class Task:
         self._threads = []
         self._workers_done = 0
         self._support_range = False
+        self._conn_stats = {}             # idx -> {'bytes','t0','last_bytes','last_t','bps','preempts','last_preempt'}
+        self._conn_lock = threading.Lock()
+        self._alloc_lock = threading.Lock()
+        self._next_seg = 0                # 弹性区下一个待领起点
+        self._seg_files = {}              # idx -> 分片临时文件路径
+        self._stop_watchdog = threading.Event()
 
     def pause(self):
         if self.state in ("下载中", "准备中"):
@@ -125,6 +134,9 @@ class Task:
             self._report()
             self._last_bytes = self.done
             self._last_t = time.time()
+            self._dl_start_t = time.time()
+            wd = threading.Thread(target=self._watchdog, daemon=True, name="dl-watchdog")
+            wd.start()
 
             self._workers_done = 0
             for i, rg in enumerate(self.ranges):
@@ -135,6 +147,7 @@ class Task:
                 w.start()
             for w in self._threads:
                 w.join()
+            self._stop_watchdog.set()
 
             if self._cancel.is_set():
                 self._save_meta()
@@ -170,6 +183,7 @@ class Task:
                 if self.on_done:
                     self.on_done(False, "合并文件失败")
         except Exception as e:
+            self._stop_watchdog.set()
             self.state = "失败"
             self.speed = 0
             self._report()
@@ -190,10 +204,18 @@ class Task:
                     return True
             except Exception:
                 pass
-        hdr, final = _headers(self.url)
+        hdr, final = _headers(self.url, extra=self.headers)
+        self.final_url = final
         total = int(hdr.get("Content-Length", 0) or 0)
         ar = hdr.get("Accept-Ranges", "").lower()
-        self._support_range = ("bytes" in ar) and total > 0
+        ct = hdr.get("Content-Type", "")
+        self._support_range = ("bytes" in ar or "bytes" in hdr.get("Accept-Ranges", "").lower()) and total > 0
+        if "text/html" in ct.lower():
+            self.state = "失败"
+            self._report()
+            if self.on_done:
+                self.on_done(False, "链接返回网页而非文件（可能需要登录或直链已过期）")
+            return False
         if not total:
             self.state = "失败"
             self._report()
@@ -225,45 +247,79 @@ class Task:
 
     def _worker(self, idx):
         try:
+            s, e, cur = self.ranges[idx]
+            retries = 0
             while True:
-                if not self._wait():      # 取消 -> 退出（保留断点）
+                if not self._wait():
                     return
-                s, e, cur = self.ranges[idx]
-                if cur > e:               # 本片完成
+                if cur > e:
                     break
-                end = e
-                req = urllib.request.Request(self.url, headers={
-                    "User-Agent": UA,
-                    "Range": "bytes=%d-%d" % (cur, end),
-                })
+                h = dict(self.headers)
+                h["User-Agent"] = UA
+                h["Range"] = "bytes=%d-%d" % (cur, e)
+                req = urllib.request.Request(self.final_url if hasattr(self, "final_url") else self.url, headers=h)
                 try:
                     r = urllib.request.urlopen(req, timeout=30)
                 except urllib.error.HTTPError as he:
-                    if he.code == 416:    # 服务端认为已完成
+                    if he.code == 416:
                         cur = e + 1
                         with self._lock:
                             self.ranges[idx][2] = cur
                         break
-                    raise
+                    retries += 1
+                    if retries > 3:
+                        return
+                    time.sleep(min(0.5 * retries, 3))
+                    continue
                 with r, open(self.part, "r+b") as f:
+                    code = getattr(r, "status", 200)
+                    if code == 200 and self._support_range and cur > s:
+                        pass
+                    crange = r.headers.get("Content-Range", "")
+                    if code == 200 and self._support_range and not crange:
+                        retries += 1
+                        if retries > 3:
+                            return
+                        time.sleep(min(0.5 * retries, 3))
+                        continue
                     f.seek(cur)
+                    expected = e - cur + 1
+                    written = 0
                     while True:
-                        if not self._wait():  # 取消 -> 立即停（断点已由循环末保存）
+                        if not self._wait():
                             self._save_meta()
                             return
                         buf = r.read(65536)
                         if not buf:
                             break
-                        f.write(buf)
-                        cur += len(buf)
+                        allow = min(len(buf), expected - written)
+                        if allow <= 0:
+                            break
+                        f.write(buf[:allow])
+                        written += allow
+                        cur += allow
                         with self._lock:
                             self.ranges[idx][2] = cur
-                            self.done += len(buf)
+                            self.done += allow
+                            st = self._conn_stats.setdefault(idx, {"idx": idx, "bytes": 0, "t0": time.time(),
+                                  "last_bytes": 0, "last_t": time.time(), "bps": 0, "preempts": 0, "last_preempt": 0})
+                            st["bytes"] += allow
                         self._tick_speed()
                         self._save_meta_throttled()
+                        if self._is_preempted(idx):
+                            break
+                        if written >= expected:
+                            break
                 with self._lock:
                     self.ranges[idx][2] = cur
                 self._save_meta()
+                if written < expected and cur <= e:
+                    retries += 1
+                    if retries > 3:
+                        return
+                    time.sleep(min(0.5 * retries, 3))
+                    continue
+                retries = 0
             self._workers_done += 1
         except Exception:
             pass
@@ -274,6 +330,53 @@ class Task:
         if now - Task._last_meta > 2.0:
             Task._last_meta = now
             self._save_meta()
+
+    def _is_preempted(self, idx):
+        st = self._conn_stats.get(idx)
+        if not st or not st.get("preempt_flag"):
+            return False
+        st["preempt_flag"] = False
+        st["preempts"] = st.get("preempts", 0) + 1
+        st["last_preempt"] = time.time()
+        return True
+
+    def _watchdog(self):
+        tick = 0
+        while not self._stop_watchdog.wait(5):
+            if self.state not in ("下载中",) or self._cancel.is_set():
+                continue
+            tick += 1
+            now = time.time()
+            with self._lock:
+                total_done = self.done
+                stats = [dict(v) for v in self._conn_stats.values()]
+            elapsed = max(0.001, now - getattr(self, "_dl_start_t", now))
+            n = max(1, self.threads)
+            avg = total_done / elapsed / n
+            floor = max(12 * 1024, avg / 2)
+            slow = []
+            for st in stats:
+                b = st.get("bytes", 0)
+                lt = st.get("last_t", now)
+                dt = max(0.001, now - lt)
+                bps = max(0, (b - st.get("last_bytes", 0)) / dt)
+                st["last_bytes"] = b
+                st["last_t"] = now
+                st["bps"] = bps
+                age = now - st.get("t0", now)
+                if age < 15 and tick < 3:
+                    continue
+                if st.get("preempts", 0) >= 3:
+                    continue
+                if now - st.get("last_preempt", 0) < 10:
+                    continue
+                if bps < floor:
+                    slow.append((bps, st))
+            for bps, st in sorted(slow)[:2]:
+                with self._lock:
+                    real = self._conn_stats.get(st.get("idx"))
+                    if real is not None:
+                        real["preempt_flag"] = True
 
     def _tick_speed(self):
         now = time.time()
@@ -292,9 +395,9 @@ class Task:
         except Exception:
             return False
 
-def probe(url, timeout=15):
+def probe(url, timeout=15, headers=None):
     """返回 (文件名, 总大小, 是否支持 Range, 最终URL)；失败抛异常"""
-    hdr, final = _headers(url, timeout)
+    hdr, final = _headers(url, timeout, extra=headers)
     total = int(hdr.get("Content-Length", 0) or 0)
     rng = "bytes" in hdr.get("Accept-Ranges", "").lower()
     return _filename(url, hdr, final), total, rng, final
