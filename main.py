@@ -13,6 +13,7 @@ import threading
 import webbrowser
 import urllib.request
 
+from PyQt5 import QtWebEngineWidgets
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl, QPoint, QSize
 from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QCursor, QPainter, QColor
 from PyQt5.QtWidgets import (
@@ -1115,6 +1116,7 @@ def _setup_dpi():
     try:
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     except Exception:
         pass
     if sys.platform != "win32":
