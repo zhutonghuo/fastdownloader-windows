@@ -18,7 +18,8 @@ from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QCursor, QPainter, QColor
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QLineEdit, QVBoxLayout, QHBoxLayout,
     QFrame, QStackedWidget, QScrollArea, QFileDialog, QMessageBox, QProgressBar,
-    QDialog, QSizePolicy, QGraphicsDropShadowEffect, QComboBox, QCheckBox, QMenu
+    QDialog, QSizePolicy, QGraphicsDropShadowEffect, QComboBox, QCheckBox, QMenu,
+    QListWidget, QListWidgetItem, QAbstractItemView
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
@@ -271,11 +272,13 @@ class MainWindow(QWidget):
         tabbar = QWidget(); tabbar.setMaximumWidth(1180)
         modetabs = QHBoxLayout(tabbar); modetabs.setContentsMargins(16, 0, 16, 8); modetabs.setSpacing(8)
         self.tab_dl = QPushButton("⬇ HTTP 高速下载"); self.tab_dl.setCheckable(True); self.tab_dl.setChecked(True)
+        self.tab_pan = QPushButton("☁ 网盘下载"); self.tab_pan.setCheckable(True)
         self.tab_host = QPushButton("📡 开房间"); self.tab_host.setCheckable(True)
         self.tab_guest = QPushButton("🔗 加入房间"); self.tab_guest.setCheckable(True)
-        for t in (self.tab_dl, self.tab_host, self.tab_guest):
+        for t in (self.tab_dl, self.tab_pan, self.tab_host, self.tab_guest):
             t.setObjectName("tab"); modetabs.addWidget(t)
         self.tab_dl.clicked.connect(lambda: self.switch_mode("download"))
+        self.tab_pan.clicked.connect(lambda: self.switch_mode("pan"))
         self.tab_host.clicked.connect(lambda: self.switch_mode("host"))
         self.tab_guest.clicked.connect(lambda: self.switch_mode("guest"))
         modetabs.addStretch(1)
@@ -294,8 +297,9 @@ class MainWindow(QWidget):
         left.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         lv = QVBoxLayout(left); lv.setContentsMargins(16, 16, 16, 16); lv.setSpacing(9)
 
-        self.stack = QStackedWidget()  # 三个模式面板：download / host / guest
+        self.stack = QStackedWidget()  # 四个模式面板：download / pan / host / guest
         self.stack.addWidget(self._build_download_panel())
+        self.stack.addWidget(self._build_pan_panel())
         self.stack.addWidget(self._build_host_panel())
         self.stack.addWidget(self._build_guest_panel())
         lv.addWidget(self.stack, 1)
@@ -312,6 +316,40 @@ class MainWindow(QWidget):
         outer = QHBoxLayout(); outer.setContentsMargins(0, 0, 0, 0)
         outer.addStretch(1); outer.addWidget(content, 0); outer.addStretch(1)
         root.addLayout(outer, 1)
+
+    def _build_pan_panel(self):
+        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(9)
+        tip = QLabel("粘贴网盘分享链接，自动识别平台并列出文件，选中的文件交给高速引擎下载。")
+        tip.setObjectName("sub"); tip.setWordWrap(True); v.addWidget(tip)
+
+        v.addWidget(QLabel("分享链接（可整段粘贴，自动提取提取码）"))
+        self.pan_url = QLineEdit(); self.pan_url.setPlaceholderText("https://pan.quark.cn/s/xxxx 提取码: abcd")
+        self.pan_url.setMinimumHeight(38); v.addWidget(self.pan_url)
+
+        self.pan_platform = QLabel("平台：等待识别…"); self.pan_platform.setObjectName("sub")
+        v.addWidget(self.pan_platform)
+
+        self.pan_parse_btn = QPushButton("解析文件列表"); self.pan_parse_btn.clicked.connect(self.parse_pan)
+        v.addWidget(self.pan_parse_btn)
+
+        crow = QHBoxLayout()
+        crow.addWidget(QLabel("Cookie / Token（需登录的网盘）"))
+        crow.addStretch(1)
+        self.pan_login_btn = QPushButton("网页登录"); self.pan_login_btn.setObjectName("small")
+        self.pan_login_btn.clicked.connect(self.open_web_login); crow.addWidget(self.pan_login_btn)
+        v.addLayout(crow)
+        self.pan_cookie = QLineEdit(); self.pan_cookie.setPlaceholderText("登录后自动填入，或手动粘贴 Cookie；GitHub 可填 Token")
+        self.pan_cookie.setEchoMode(QLineEdit.Password); v.addWidget(self.pan_cookie)
+
+        self.pan_files = QListWidget(); self.pan_files.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.pan_files.setMinimumHeight(120); v.addWidget(self.pan_files, 1)
+
+        self.pan_dl_btn = QPushButton("下载选中文件"); self.pan_dl_btn.clicked.connect(self.download_pan_files)
+        self.pan_dl_btn.setEnabled(False); v.addWidget(self.pan_dl_btn)
+
+        hint = QLabel("提示：GitHub / 蓝奏云免登录；夸克 / UC 点「网页登录」后解析。百度等接口适配中。登录 Cookie 自动填入，也可手动粘贴。仅下载你有权获取的内容。")
+        hint.setObjectName("sub"); hint.setWordWrap(True); v.addWidget(hint)
+        return w
 
     def _build_download_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
@@ -516,20 +554,22 @@ class MainWindow(QWidget):
 
     # ---------- 模式切换 ----------
     def switch_mode(self, mode):
-        if self.room_on and mode != self.mode and mode != "download":
+        if self.room_on and mode != self.mode and mode not in ("download", "pan"):
             QMessageBox.information(self, "提示", "请先关闭当前房间/退出后再切换模式。")
-            for t, m in ((self.tab_dl, "download"), (self.tab_host, "host"), (self.tab_guest, "guest")):
+            for t, m in ((self.tab_dl, "download"), (self.tab_pan, "pan"),
+                         (self.tab_host, "host"), (self.tab_guest, "guest")):
                 t.setChecked(self.mode == m)
             return
-        # HTTP 下载可与房间共存（不冲突），但切换时仅换 UI
+        # 下载模式可与房间共存（不冲突），但切换时仅换 UI
         self.mode = mode
         self.tab_dl.setChecked(mode == "download")
+        self.tab_pan.setChecked(mode == "pan")
         self.tab_host.setChecked(mode == "host")
         self.tab_guest.setChecked(mode == "guest")
-        idx = {"download": 0, "host": 1, "guest": 2}[mode]
+        idx = {"download": 0, "pan": 1, "host": 2, "guest": 3}[mode]
         self.stack.setCurrentIndex(idx)
-        # 收起未用到的区域：下载->任务；房间模式且已连接->聊天；否则->占位引导
-        if mode == "download":
+        # 收起未用到的区域：下载/网盘->任务；房间模式且已连接->聊天；否则->占位引导
+        if mode in ("download", "pan"):
             self.right_stack.setCurrentIndex(0)
         else:
             self.right_stack.setCurrentIndex(1 if self.room_on else 2)
@@ -851,6 +891,120 @@ class MainWindow(QWidget):
             self.seen_ts = 0
             self.render_chat()
             self.toast("聊天显示已清空")
+
+    # ---------- 网盘下载 ----------
+    def open_web_login(self):
+        try:
+            import web_login
+        except Exception as e:
+            QMessageBox.warning(self, "登录舱不可用", "WebEngine 组件加载失败：%s" % str(e)[:100])
+            return
+        text = self.pan_url.text().strip()
+        share = None
+        if text:
+            import pan
+            share = pan.parse_share(text)
+        platform = share["platform"] if share else "quark"
+        dlg = web_login.WebLoginDialog(platform, self, self.dark)
+        def on_cookies(cookie_str):
+            self.pan_cookie.setText(cookie_str)
+            self.toast("已提取 %s 的登录状态" % platform)
+        dlg.cookies_ready.connect(on_cookies)
+        try:
+            dlg.exec_()
+        except Exception as e:
+            QMessageBox.warning(self, "登录窗口出错", str(e)[:150])
+
+    def parse_pan(self):
+        import pan
+        text = self.pan_url.text().strip()
+        if not text:
+            self.toast("请先粘贴网盘分享链接")
+            return
+        share = pan.parse_share(text)
+        if not share:
+            self.pan_platform.setText("平台：未识别（检查链接格式）")
+            self.toast("未识别的网盘链接")
+            return
+        self.pan_platform.setText("平台：%s · %s" % (share["platform_name"], share["share_id"][:16]))
+        self.pan_parse_btn.setEnabled(False)
+        self.pan_parse_btn.setText("解析中…")
+
+        def work():
+            try:
+                cookies = self.pan_cookie.text().strip() or None
+                token = cookies if share["platform"] == "github" else None
+                files = pan.resolve(share, cookies=cookies, token=token)
+                def ok():
+                    self.pan_files.clear()
+                    for f in files:
+                        it = QListWidgetItem("%s  (%s)" % (f.get("name", "文件"), L.fmt_size(f.get("size", 0))))
+                        it.setData(Qt.UserRole, f)
+                        self.pan_files.addItem(it)
+                    self.pan_dl_btn.setEnabled(bool(files))
+                    self.pan_parse_btn.setEnabled(True)
+                    self.pan_parse_btn.setText("解析文件列表")
+                    self.toast("解析到 %d 个文件" % len(files))
+                QTimer.singleShot(0, ok)
+            except Exception as e:
+                def bad(msg=str(e)):
+                    self.pan_parse_btn.setEnabled(True)
+                    self.pan_parse_btn.setText("解析文件列表")
+                    self.pan_files.clear()
+                    self.pan_dl_btn.setEnabled(False)
+                    QMessageBox.warning(self, "解析失败", msg[:200])
+                QTimer.singleShot(0, bad)
+        threading.Thread(target=work, daemon=True).start()
+
+    def download_pan_files(self):
+        import pan
+        items = self.pan_files.selectedItems()
+        if not items:
+            self.toast("请先选中要下载的文件")
+            return
+        cookies = self.pan_cookie.text().strip() or None
+        resolved = []
+        for it in items:
+            f = it.data(Qt.UserRole)
+            if f.get("platform") == "quark" and f.get("fid"):
+                try:
+                    resolved.extend(pan.quark_direct([f], cookies=cookies))
+                except Exception as e:
+                    QMessageBox.warning(self, "取直链失败", str(e)[:120])
+                continue
+            if str(f.get("url", "")).startswith("baidu://"):
+                QMessageBox.information(self, "百度网盘", "百度直链需额外接口取链，当前版本暂未开放。请先用蓝奏云 / GitHub / 夸克 / UC。")
+                continue
+            if f.get("url"):
+                resolved.append(f)
+        for f in resolved:
+            url = f.get("url", "")
+            headers = dict(f.get("headers") or {})
+            if cookies:
+                headers["Cookie"] = cookies
+            try:
+                name, total, rng, final = http_dl.probe(url, headers=headers)
+            except Exception as e:
+                QMessageBox.warning(self, "取链失败", "%s：%s" % (f.get("name", "文件"), str(e)[:100]))
+                continue
+            default = os.path.join(os.path.expanduser("~"), "Downloads", f.get("name") or name)
+            dest = QFileDialog.getSaveFileName(self, "保存到", default, "所有文件 (*.*)")[0]
+            if not dest:
+                continue
+            card = DownloadTaskCard(dest, f.get("name") or name, self.threads_for_pan(), self.dark)
+            self.dl_list.insertWidget(self.dl_list.count() - 1, card)
+            task = http_dl.Task(url, dest, threads=self.threads_for_pan(), headers=headers,
+                on_progress=lambda d, t, s, st, c=card: self._on_dl_progress(c, d, t, s, st),
+                on_done=lambda ok, m, c=card: self._on_dl_done(c, ok, m))
+            card.task = task
+            self.dl_tasks.append(task)
+            self.dl_body.setCurrentIndex(1)
+            task.start()
+        self.switch_mode("download")
+        self.toast("已开始 %d 个网盘下载任务" % len(resolved))
+
+    def threads_for_pan(self):
+        return 8
 
     # ---------- HTTP 多线程下载 ----------
     def start_download(self):
