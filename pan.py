@@ -35,6 +35,43 @@ PATTERNS = [
 
 GITHUB_RE = re.compile(r"github\.com/([^/]+)/([^/]+)(?:/(?:blob|tree)/(.+))?", re.I)
 
+# 主域名（登录态 Cookie 通常挂在主域上，校验/提取都要覆盖主域而不是 pan.* 子域）
+MAIN_DOMAINS = {
+    "quark": "quark.cn", "uc": "uc.cn", "xunlei": "xunlei.com", "baidu": "baidu.com",
+    "c139": "139.com", "pan123": "123pan.cn", "pan115": "115.com",
+    "guangya": "guangyapan.com", "ilanzou": "ilanzou.com", "lanzou": "lanzoui.com",
+    "github": "github.com",
+}
+
+# 各平台在主域名下的登录标志 Cookie
+LOGIN_COOKIE_HINTS = {
+    "quark": ("__pus", "__puus"),
+    "uc": ("__pus", "__puus"),
+    "baidu": ("BDUSS", "STOKEN"),
+    "pan115": ("UID", "CID"),
+    "github": ("user_session", "logged_in"),
+}
+
+
+def main_domain(platform):
+    return MAIN_DOMAINS.get(platform, "")
+
+
+def cookie_names(cookies):
+    out = set()
+    for part in (cookies or "").split(";"):
+        if "=" in part:
+            out.add(part.strip().split("=", 1)[0])
+    return out
+
+
+def has_login_cookie(platform, cookies):
+    hints = LOGIN_COOKIE_HINTS.get(platform)
+    if not hints:
+        return False
+    names = cookie_names(cookies)
+    return any(h in names for h in hints)
+
 
 def parse_share(text, force_platform=None):
     text = (text or "").strip()
@@ -301,14 +338,35 @@ def resolve_baidu(share, cookies=None):
 
 
 def verify_login(platform, cookies):
-    """校验登录态。返回 True=已登录 / False=未登录 / None=该平台暂无法校验。"""
+    """校验登录态。返回 True=已登录 / False=未登录 / None=该平台暂无法校验。
+    顺序：先看主域名是否被踢到登录页 → 再看主域名下的登录标志 Cookie → 最后调平台接口。"""
     if not cookies or not cookies.strip():
         return False
     p = platform
+    md = main_domain(p)
+
+    # 1) 主域名探测：被重定向到登录/授权页 => 明确未登录
+    if md:
+        try:
+            req = urllib.request.Request("https://" + md + "/", headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                final = (r.geturl() or "").lower()
+            if any(k in final for k in ("/login", "/signin", "passport.", "/authorize")):
+                return False
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return False
+        except Exception:
+            pass
+
+    # 2) 主域名登录标志 Cookie
+    hint_ok = has_login_cookie(p, cookies)
+
+    # 3) 平台接口校验
     try:
         if p in ("quark", "uc"):
             base = "https://drive-pc.quark.cn/1/clouddrive" if p == "quark" else "https://drive.uc.cn/1/clouddrive"
-            ref = "https://pan.quark.cn/" if p == "quark" else "https://drive.uc.cn/"
+            ref = "https://" + (md or "quark.cn") + "/"
             hdr = _cookie_headers(cookies, ref)
             params = urllib.parse.urlencode({"pr": "ucpro", "fr": "pc", "pdir_fid": "0",
                 "_page": "1", "_size": "10", "_fetch_total": "1"})
@@ -316,22 +374,30 @@ def verify_login(platform, cookies):
             code = obj.get("code")
             if code is None:
                 code = obj.get("status")
-            return code == 0
+            if code == 0:
+                return True
+            return False
         if p == "baidu":
-            hdr = _cookie_headers(cookies, "https://pan.baidu.com/")
+            hdr = _cookie_headers(cookies, "https://" + (md or "baidu.com") + "/")
             obj, _ = _http("https://pan.baidu.com/api/list?" + urllib.parse.urlencode(
                 {"dir": "/", "page": "1", "num": "10", "order": "name", "desc": "0"}),
                 headers=hdr, timeout=15)
-            return obj.get("errno") == 0
+            if obj.get("errno") == 0:
+                return True
+            return False
         if p == "github":
             hdr = {"Cookie": cookies, "Accept": "application/vnd.github+json",
                    "User-Agent": UA}
             obj, _ = _http("https://api.github.com/user", headers=hdr, timeout=15)
             return bool(obj.get("login"))
-    except Exception as e:
-        # 网络异常时不做判定，避免误报"未登录"
-        return None
-    return None
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False
+        return None if not hint_ok else True
+    except Exception:
+        return True if hint_ok else None
+    # 该平台没有接口：主域名标志 Cookie 存在即视为已登录
+    return True if hint_ok else None
 
 
 def list_my_files(platform, cookies, fid="0"):

@@ -291,14 +291,22 @@ class WebLoginDialog(QDialog):
             self.title_lbl.setText("请在网页里完成登录")
 
     def _from_storage(self):
-        """从持久化 Cookie 存储读取该站点应有的全部 Cookie（含父域 Cookie）。"""
+        """从持久化 Cookie 存储读取该站点应有的全部 Cookie。
+        除登录页外，同时按「主域名」采样——登录态 Cookie 常挂在主域（如 .quark.cn）上。"""
         out = {}
+        import pan
+        urls = []
         url = LOGIN_URLS.get(self.platform)
-        if not url:
-            return ""
+        if url:
+            urls.append(url)
+            urls.append(url.rstrip("/") + "/")
+        md = pan.main_domain(self.platform)
+        if md:
+            urls.append("https://" + md + "/")
+            urls.append("https://www." + md + "/")
         try:
             store = self.profile.cookieStore()
-            for u in (url, url.rstrip("/") + "/"):
+            for u in urls:
                 for c in store.cookieForUrl(QUrl(u)):
                     name = bytes(c.name()).decode("utf-8", "replace")
                     value = bytes(c.value()).decode("utf-8", "replace")
