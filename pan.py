@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import re
+import os
 import json
 import time
 import urllib.request
@@ -381,6 +382,67 @@ def myfile_direct(files, cookies):
     if platform == "baidu":
         raise ResolveError("百度账号文件的直链接口适配中，当前可用：夸克 / UC")
     raise ResolveError("该平台暂不支持账号文件下载")
+
+
+def _account_file():
+    return os.path.join(os.path.expanduser("~"), ".jisudownloader", "accounts.json")
+
+
+def load_accounts():
+    try:
+        with open(_account_file(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_account(platform, cookies, name=""):
+    acc = load_accounts()
+    acc[platform] = {"cookie": cookies, "name": name or PLATFORMS.get(platform, platform),
+                     "ts": time.time()}
+    p = _account_file()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(acc, f, ensure_ascii=False)
+
+
+def logout_account(platform):
+    acc = load_accounts()
+    acc.pop(platform, None)
+    p = _account_file()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(acc, f, ensure_ascii=False)
+
+
+def save_to_my_drive(share, files, cookies, pdir_fid="0"):
+    """把分享文件转存到登录账号自己的网盘。成功返回 True，失败抛 ResolveError。"""
+    p = share["platform"]
+    if p in ("quark", "uc"):
+        base = "https://drive-pc.quark.cn/1/clouddrive" if p == "quark" else "https://drive.uc.cn/1/clouddrive"
+        ref = "https://pan.quark.cn/" if p == "quark" else "https://drive.uc.cn/"
+        hdr = _cookie_headers(cookies, ref)
+        hdr["Content-Type"] = "application/json"
+        body = json.dumps({
+            "fid_list": [f["fid"] for f in files],
+            "token_list": [f.get("share_fid_token") for f in files],
+            "pwd_id": share["share_id"],
+            "stoken": files[0].get("stoken", ""),
+            "pdir_fid": pdir_fid,
+        }).encode("utf-8")
+        req = urllib.request.Request(base + "/share/sharepage/save?" + urllib.parse.urlencode(
+            {"pr": "ucpro", "fr": "pc"}), data=body, headers=hdr, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                obj = json.load(r)
+        except Exception as e:
+            raise ResolveError("转存失败：%s" % str(e)[:80])
+        if obj.get("code") not in (0, None):
+            raise ResolveError(obj.get("message") or "转存失败（可能需会员或空间不足）")
+        return True
+    if p == "baidu":
+        raise ResolveError("百度转存接口适配中，可直接下载")
+    raise ResolveError("%s 转存接口适配中，可直接下载" % PLATFORMS.get(p, p))
 
 
 def resolve(share, cookies=None, token=None):
