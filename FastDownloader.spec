@@ -6,7 +6,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('D:\\一些小项目\\FastDownloaderWindows\\assets\\lan.html', 'assets')],
-    hiddenimports=['PyQt5.QtMultimedia', 'PyQt5.QtMultimediaWidgets', 'qrcode', 'PIL'],
+    hiddenimports=['PyQt5.QtMultimedia', 'PyQt5.QtMultimediaWidgets', 'qrcode', 'PIL', 'pan', 'myfiles', 'web_login', 'PyQt5.QtWebEngineWidgets', 'PyQt5.QtWebEngineCore', 'PyQt5.QtNetwork'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['D:\\一些小项目\\FastDownloaderWindows\\app.ico'],
 )
