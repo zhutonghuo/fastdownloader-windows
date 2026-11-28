@@ -163,11 +163,19 @@ class WebLoginDialog(QDialog):
         v.addWidget(hint)
 
         cs = self.profile.cookieStore()
+        self.cookie_store = cs
         cs.cookieAdded.connect(self._on_cookie)
+        cs.cookieRemoved.connect(self._on_cookie_removed)
+        # 关键：QtWebEngine 5.15 的 QWebEngineCookieStore 没有 cookieForUrl()/getAllCookies()，
+        # 只能通过 cookieAdded 信号收集；已存在的 Cookie 必须 loadAllCookies() 才会发信号。
+        try:
+            cs.loadAllCookies()
+        except Exception:
+            pass
         self.view.urlChanged.connect(self._on_url)
         self.view.loadProgress.connect(self._on_progress)
         self.view.loadFinished.connect(self._on_loaded)
-        _log("cookie store connected")
+        _log("cookie store connected (loadAllCookies called)")
 
         try:
             self.view.load(QUrl(login_url_for(platform)))
@@ -194,12 +202,23 @@ class WebLoginDialog(QDialog):
             name = bytes(cookie.name()).decode("utf-8", "replace")
             value = bytes(cookie.value()).decode("utf-8", "replace")
             domain = bytes(cookie.domain()).decode("utf-8", "replace")
+            _log("cookieAdded %s (%s) len=%d" % (name, domain, len(value)))
             if not name or not value or len(name) >= 80 or len(value) >= 2000:
                 return
             if not self._domain_ok(domain):
+                _log("  -> filtered by domain")
                 return
             self._cookies[name] = value
-            _log("cookie +%s (%s)" % (name, domain))
+            _log("  -> kept (%d total)" % len(self._cookies))
+        except Exception:
+            _log("cookie ERR " + traceback.format_exc())
+
+    def _on_cookie_removed(self, cookie):
+        """Cookie 被删除/覆盖时同步移除，避免残留旧值。"""
+        try:
+            name = bytes(cookie.name()).decode("utf-8", "replace")
+            if name:
+                self._cookies.pop(name, None)
         except Exception:
             pass
 
@@ -229,11 +248,50 @@ class WebLoginDialog(QDialog):
         QMessageBox.information(self, "已清除 Cookie",
                                 "浏览器中的 Cookie 已清空。\n请在网页里重新登录后再点「完成登录」。")
 
+    def _js_cookies(self):
+        """兜底：用 JS 从当前页面读 document.cookie（HttpOnly 读不到，但可作补充）。"""
+        out = {}
+        try:
+            from PyQt5.QtCore import QEventLoop, QTimer
+            box = {}
+            loop = QEventLoop()
+
+            def cb(v):
+                box["v"] = v
+                loop.quit()
+
+            self.view.page().runJavaScript("document.cookie", cb)
+            QTimer.singleShot(2500, loop.quit)
+            loop.exec_()
+            raw = box.get("v") or ""
+            for part in str(raw).split(";"):
+                if "=" in part:
+                    k, v = part.strip().split("=", 1)
+                    if k and v:
+                        out[k] = v
+            _log("_js_cookies: %d" % len(out))
+        except Exception:
+            _log("js cookies ERR " + traceback.format_exc())
+        return out
+
     def _finish(self):
         """提取 Cookie → 校验登录态 → 确认后才算登录成功。"""
         cookie_str = self._from_storage()
         if not cookie_str:
             cookie_str = "; ".join("%s=%s" % (k, v) for k, v in self._cookies.items())
+        # 双保险：合并 JS 读到的当前页 Cookie（补上 cookieAdded 未覆盖到的项）
+        try:
+            js = self._js_cookies()
+            parts = dict()
+            for item in cookie_str.split(";"):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    parts[k] = v
+            for k, v in js.items():
+                parts.setdefault(k, v)
+            cookie_str = "; ".join("%s=%s" % (k, v) for k, v in parts.items())
+        except Exception:
+            pass
         if not cookie_str.strip():
             _log("finish: no cookie")
             QMessageBox.warning(
@@ -295,44 +353,21 @@ class WebLoginDialog(QDialog):
             self.title_lbl.setText("请在网页里完成登录")
 
     def _from_storage(self):
-        """从持久化 Cookie 存储读取该站点应有的全部 Cookie。
-        除登录页外，同时按「主域名」采样——登录态 Cookie 常挂在主域（如 .quark.cn）上。"""
-        out = {}
+        """取得当前站点的全部 Cookie。
+        注意：QtWebEngine 5.15 的 QWebEngineCookieStore 没有 cookieForUrl()/getAllCookies()，
+        唯一可靠方式是通过 cookieAdded 信号收集（已存在的 Cookie 用 loadAllCookies() 触发）。
+        这里在返回前再触发一次 loadAllCookies()，确保页面登录后写入的 Cookie 都已进来。"""
         import pan
-        urls = []
-        url = LOGIN_URLS.get(self.platform)
-        if url:
-            urls.append(url)
-            urls.append(url.rstrip("/") + "/")
-        md = pan.main_domain(self.platform)
-        if md:
-            urls.append("https://" + md + "/")
-            urls.append("https://www." + md + "/")
         try:
-            store = self.profile.cookieStore()
-            for u in urls:
-                for c in store.cookieForUrl(QUrl(u)):
-                    name = bytes(c.name()).decode("utf-8", "replace")
-                    value = bytes(c.value()).decode("utf-8", "replace")
-                    domain = bytes(c.domain()).decode("utf-8", "replace")
-                    if not name or not value:
-                        continue
-                    if not self._domain_ok(domain):
-                        continue
-                    out[name] = value
+            cs = getattr(self, "cookie_store", None) or self.profile.cookieStore()
+            cs.loadAllCookies()
         except Exception:
-            _log("storage ERR " + traceback.format_exc())
+            _log("loadAllCookies ERR " + traceback.format_exc())
+        out = dict(self._cookies)
+        _log("_from_storage: %d cookies" % len(out))
         return "; ".join("%s=%s" % (k, v) for k, v in out.items())
 
     def _collect(self, domain):
-        """兼容旧调用：返回指定域下的 (name, value) 列表。"""
-        out = []
-        try:
-            for c in self.profile.cookieStore().cookieForUrl(QUrl("https://" + domain.lstrip("."))):
-                name = bytes(c.name()).decode("utf-8", "replace")
-                value = bytes(c.value()).decode("utf-8", "replace")
-                if name and value:
-                    out.append((name, value))
-        except Exception:
-            pass
-        return out
+        """兼容旧调用：返回已收集的 (name, value) 列表。
+        QtWebEngine 5.15 无 cookieForUrl()，统一走 cookieAdded 信号收集的 self._cookies。"""
+        return list(self._cookies.items())

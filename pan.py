@@ -339,20 +339,29 @@ def resolve_baidu(share, cookies=None):
 
 def verify_login(platform, cookies):
     """校验登录态。返回 True=已登录 / False=未登录 / None=该平台暂无法校验。
-    顺序：主域名是否被踢到登录页 → 平台接口是否授权 → 主域名登录标志 Cookie 兜底。
+    顺序：平台接口（最强信号、短超时，成功即返回） → 主域 HEAD 探测兜底 → 登录标志 Cookie。
     注意：平台接口的 Referer 必须用其自身域名（pan.quark.cn / drive.uc.cn / pan.baidu.com），
-    用主域名会被网关判为跨域非法请求（403 Invalid CORS request），不能当作"未登录"。"""
+    用主域名会被网关判为跨域非法请求（403 Invalid CORS request），不能当作"未登录"。
+    重要：不要在接口前 GET 主域首页——那会下载整个页面（15s 超时）再叠加接口超时，
+    导致点「完成登录」后要等近一分钟。"""
     if not cookies or not cookies.strip():
         return False
     p = platform
-    md = main_domain(p)
+    hint_ok = has_login_cookie(p, cookies)
 
-    # 1) 主域名探测：被重定向到登录/授权页 => 明确未登录
+    # 1) 先走平台接口（通常 1 次请求即可判定）
+    api = _verify_by_api(p, cookies, hint_ok)
+    if api is not None:
+        return api
+
+    # 2) 接口无结论（无适配 / 403 风控 / 网络异常）才做主域探测兜底。
+    #    用 HEAD + 短超时，只判断跳转，不下载页面内容。
+    md = main_domain(p)
     if md:
         try:
             hdr = {"User-Agent": UA, "Cookie": cookies}
-            req = urllib.request.Request("https://" + md + "/", headers=hdr)
-            with urllib.request.urlopen(req, timeout=15) as r:
+            req = urllib.request.Request("https://" + md + "/", headers=hdr, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as r:
                 final = (r.geturl() or "").lower()
             if any(k in final for k in ("/login", "/signin", "passport.", "/authorize")):
                 return False
@@ -361,11 +370,12 @@ def verify_login(platform, cookies):
                 return False
         except Exception:
             pass
+    return True if hint_ok else None
 
-    # 2) 主域名下的登录标志 Cookie（接口被网关拒绝时的兜底）
-    hint_ok = has_login_cookie(p, cookies)
 
-    # 3) 平台接口校验（Referer 必须用平台自身域名）
+def _verify_by_api(platform, cookies, hint_ok):
+    """平台接口校验；返回 None 表示无适配或需主域兜底。Referer 用平台自身域名。"""
+    p = platform
     try:
         if p in ("quark", "uc"):
             base = "https://drive-pc.quark.cn/1/clouddrive" if p == "quark" else "https://drive.uc.cn/1/clouddrive"
@@ -373,7 +383,7 @@ def verify_login(platform, cookies):
             hdr = _cookie_headers(cookies, ref)
             params = urllib.parse.urlencode({"pr": "ucpro", "fr": "pc", "pdir_fid": "0",
                 "_page": "1", "_size": "10", "_fetch_total": "1", "_fetch_sub_dirs": "0"})
-            obj, _ = _http(base + "/file/sort?" + params, headers=hdr, timeout=15)
+            obj, _ = _http(base + "/file/sort?" + params, headers=hdr, timeout=8)
             code = obj.get("code")
             if code is None:
                 code = obj.get("status")
@@ -385,24 +395,23 @@ def verify_login(platform, cookies):
             hdr = _cookie_headers(cookies, "https://pan.baidu.com/")
             obj, _ = _http("https://pan.baidu.com/api/list?" + urllib.parse.urlencode(
                 {"dir": "/", "page": "1", "num": "10", "order": "name", "desc": "0"}),
-                headers=hdr, timeout=15)
+                headers=hdr, timeout=8)
             if obj.get("errno") == 0:
                 return True
             return True if hint_ok else False
         if p == "github":
             hdr = {"Cookie": cookies, "Accept": "application/vnd.github+json",
                    "User-Agent": UA}
-            obj, _ = _http("https://api.github.com/user", headers=hdr, timeout=15)
+            obj, _ = _http("https://api.github.com/user", headers=hdr, timeout=8)
             return bool(obj.get("login"))
     except urllib.error.HTTPError as e:
         if e.code == 401:
             return False
-        # 403 多为网关跨域/风控拦截，不能当未登录；有登录标志 cookie 仍算已登录
-        return True if hint_ok else None
+        # 403 多为网关跨域/风控拦截，不能当未登录 → 交给主域探测兜底
+        return None
     except Exception:
-        return True if hint_ok else None
-    # 该平台没有接口：主域名标志 Cookie 存在即视为已登录
-    return True if hint_ok else None
+        return None
+    return None
 
 
 def list_my_files(platform, cookies, fid="0"):
