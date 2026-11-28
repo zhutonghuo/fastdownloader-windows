@@ -26,7 +26,7 @@
 
 ## 下载与使用
 
-从 [Releases](https://github.com/zhutonghuo/fastdownloader-windows/releases) 下载 `FastDownloader.exe`（单文件，约 35MB），双击运行即可，无需 Python 环境。
+从 [Releases](https://github.com/zhutonghuo/fastdownloader-windows/releases) 下载 `FastDownloader.exe`（单文件，约 92MB），双击运行即可，无需 Python 环境。
 
 也可从官网下载：<https://zhutonghuo.xyz/fdwin/>（或直链 <https://zhutonghuo.xyz/fdwin/FastDownloader.exe>）
 
