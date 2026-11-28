@@ -300,6 +300,40 @@ def resolve_baidu(share, cookies=None):
     return out
 
 
+def verify_login(platform, cookies):
+    """校验登录态。返回 True=已登录 / False=未登录 / None=该平台暂无法校验。"""
+    if not cookies or not cookies.strip():
+        return False
+    p = platform
+    try:
+        if p in ("quark", "uc"):
+            base = "https://drive-pc.quark.cn/1/clouddrive" if p == "quark" else "https://drive.uc.cn/1/clouddrive"
+            ref = "https://pan.quark.cn/" if p == "quark" else "https://drive.uc.cn/"
+            hdr = _cookie_headers(cookies, ref)
+            params = urllib.parse.urlencode({"pr": "ucpro", "fr": "pc", "pdir_fid": "0",
+                "_page": "1", "_size": "10", "_fetch_total": "1"})
+            obj, _ = _http(base + "/file/sort?" + params, headers=hdr, timeout=15)
+            code = obj.get("code")
+            if code is None:
+                code = obj.get("status")
+            return code == 0
+        if p == "baidu":
+            hdr = _cookie_headers(cookies, "https://pan.baidu.com/")
+            obj, _ = _http("https://pan.baidu.com/api/list?" + urllib.parse.urlencode(
+                {"dir": "/", "page": "1", "num": "10", "order": "name", "desc": "0"}),
+                headers=hdr, timeout=15)
+            return obj.get("errno") == 0
+        if p == "github":
+            hdr = {"Cookie": cookies, "Accept": "application/vnd.github+json",
+                   "User-Agent": UA}
+            obj, _ = _http("https://api.github.com/user", headers=hdr, timeout=15)
+            return bool(obj.get("login"))
+    except Exception as e:
+        # 网络异常时不做判定，避免误报"未登录"
+        return None
+    return None
+
+
 def list_my_files(platform, cookies, fid="0"):
     """列出登录账号自己网盘里的文件/文件夹。
     返回 [{"name","size","is_dir","fid","path","platform"}]，fid 用于进入子目录。"""

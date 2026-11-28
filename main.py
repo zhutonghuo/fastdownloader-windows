@@ -366,19 +366,36 @@ class MainWindow(QWidget):
                 files.clicked.connect(lambda _, p=pid: self.open_my_files(p)); h.addWidget(files)
                 out = QPushButton("退出登录"); out.setObjectName("small")
                 out.clicked.connect(lambda _, p=pid: self.logout_account(p)); h.addWidget(out)
+                clr = QPushButton("清除Cookie"); clr.setObjectName("small")
+                clr.clicked.connect(lambda _, p=pid: self.clear_account_cookies(p)); h.addWidget(clr)
             else:
                 login = QPushButton("登录"); login.setObjectName("small")
                 login.clicked.connect(lambda _, p=pid: self.open_web_login(p)); h.addWidget(login)
+                clr = QPushButton("清除Cookie"); clr.setObjectName("small")
+                clr.clicked.connect(lambda _, p=pid: self.clear_account_cookies(p)); h.addWidget(clr)
             item.setSizeHint(row.sizeHint())
             self.pan_accounts.addItem(item)
             self.pan_accounts.setItemWidget(item, row)
             item.setSizeHint(QSize(0, max(44, row.sizeHint().height())))
 
     def logout_account(self, pid):
+        """退出登录：只清掉本程序保存的登录态，浏览器 Cookie 保留（再登录可自动登录）。"""
         import pan
         pan.logout_account(pid)
         self.refresh_accounts()
         self.toast("已退出 " + pid)
+
+    def clear_account_cookies(self, pid):
+        """清除 Cookie：连浏览器里的 Cookie 一起清掉，下次必须重新扫码/登录。"""
+        import pan
+        try:
+            import web_login
+            web_login.clear_cookies()
+        except Exception as e:
+            self._log_crash("clear_account_cookies", e)
+        pan.logout_account(pid)
+        self.refresh_accounts()
+        self.toast("已清除 %s 的 Cookie" % pid)
 
     # ---------- 账号文件浏览 ----------
     def open_my_files(self, platform):

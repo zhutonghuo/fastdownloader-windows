@@ -11,17 +11,18 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineProfile, QWebEnginePage
 
+# 登录跳转地址（由用户指定，勿擅自改动）
 LOGIN_URLS = {
-    "quark": "https://pan.quark.cn",
-    "uc": "https://drive.uc.cn",
-    "xunlei": "https://pan.xunlei.com",
-    "baidu": "https://pan.baidu.com",
-    "c139": "https://yun.139.com",
-    "pan123": "https://www.123pan.com",
-    "pan115": "https://115.com",
-    "guangya": "https://www.guangyapan.com",
-    "ilanzou": "https://www.ilanzou.com",
-    "lanzou": "https://www.lanzoui.com",
+    "quark": "https://pan.quark.cn/",
+    "uc": "https://drive.uc.cn/",
+    "xunlei": "https://pan.xunlei.com/login",
+    "baidu": "https://pan.baidu.com/login",
+    "c139": "https://yun.139.com/w/#/",
+    "pan123": "https://user.123pan.cn/centerlogin",
+    "pan115": "https://115.com/",
+    "guangya": "https://www.guangyapan.com/",
+    "ilanzou": "https://www.ilanzou.com/",
+    "lanzou": "https://www.lanzoui.com/",
     "github": "https://github.com/login",
 }
 
@@ -31,6 +32,23 @@ def login_url_for(platform):
     if not url:
         raise ValueError("没有 %s 的登录地址" % platform)
     return url
+
+
+def clear_cookies():
+    """清空内置浏览器的全部 Cookie（下次登录需重新扫码/输入）。"""
+    try:
+        prof = QWebEngineProfile.defaultProfile()
+        prof.cookieStore().deleteAllCookies()
+        # 部分站点还写在本机存储里，一并清掉
+        try:
+            prof.clearHttpCache()
+        except Exception:
+            pass
+        _log("cookies cleared")
+        return True
+    except Exception:
+        _log("clear ERR " + traceback.format_exc())
+        return False
 
 
 def _log(msg):
@@ -109,6 +127,8 @@ class WebLoginDialog(QDialog):
         self.title_lbl = QLabel("登录 %s · 正在加载…" % platform)
         self.title_lbl.setStyleSheet("font-size:14px;font-weight:700;")
         bl.addWidget(self.title_lbl); bl.addStretch(1)
+        clr = QPushButton("清除Cookie"); clr.setObjectName("gray")
+        clr.clicked.connect(self._clear_cookies); bl.addWidget(clr)
         done = QPushButton("完成登录"); done.setObjectName("primary")
         done.clicked.connect(self._finish); bl.addWidget(done)
         cancel = QPushButton("取消"); cancel.setObjectName("gray")
@@ -197,8 +217,20 @@ class WebLoginDialog(QDialog):
     def _on_url(self, url):
         pass
 
+    def _clear_cookies(self):
+        """清掉浏览器里的全部 Cookie（含本机存储），便于重新登录。"""
+        clear_cookies()
+        self._cookies = {}
+        try:
+            self.profile.cookieStore().deleteAllCookies()
+        except Exception:
+            pass
+        self.title_lbl.setText("已清除 Cookie，请重新登录")
+        QMessageBox.information(self, "已清除 Cookie",
+                                "浏览器中的 Cookie 已清空。\n请在网页里重新登录后再点「完成登录」。")
+
     def _finish(self):
-        """提取 Cookie 并关闭。优先从 Cookie 存储读取（更完整），其次用监听到的增量。"""
+        """提取 Cookie → 校验登录态 → 确认后才算登录成功。"""
         cookie_str = self._from_storage()
         if not cookie_str:
             cookie_str = "; ".join("%s=%s" % (k, v) for k, v in self._cookies.items())
@@ -206,12 +238,57 @@ class WebLoginDialog(QDialog):
             _log("finish: no cookie")
             QMessageBox.warning(
                 self, "未获取到 Cookie",
-                "没有在该站点检测到登录 Cookie。\n\n"
-                "请先在网页里完成登录（扫码或账号密码），页面显示已登录后，再点右上角「完成登录」。")
+                "没有在该站点检测到任何 Cookie。\n\n"
+                "请先在网页里完成登录（扫码或账号密码），页面显示已登录后，再点「完成登录」。")
             return
-        _log("finish: cookie %d 项" % len(cookie_str.split(";")))
-        self.cookies_ready.emit(cookie_str)
-        self.accept()
+        _log("finish: cookie %d 项，开始校验登录态" % len(cookie_str.split(";")))
+        self.title_lbl.setText("正在校验登录状态…")
+        self._verify_then(cookie_str)
+
+    def _verify_then(self, cookie_str):
+        import threading
+        import pan
+
+        def work():
+            try:
+                state = pan.verify_login(self.platform, cookie_str)
+            except Exception:
+                state = None
+            QTimer.singleShot(0, lambda: self._on_verified(cookie_str, state))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_verified(self, cookie_str, state):
+        if state is True:
+            _log("verify: logged in")
+            self.title_lbl.setText("登录成功")
+            self.cookies_ready.emit(cookie_str)
+            self.accept()
+            return
+        if state is None:
+            # 该平台暂无法自动校验（或网络异常）：不阻塞用户，但要如实说明
+            _log("verify: unknown")
+            self.title_lbl.setText("已保存登录状态")
+            self.cookies_ready.emit(cookie_str)
+            self.accept()
+            return
+        # state is False：明确未登录
+        _log("verify: NOT logged in")
+        self.title_lbl.setText("未检测到登录状态")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("未检测到登录状态")
+        box.setText("没有检测到 %s 的有效登录态。\n\n"
+                    "可能的原因：还没完成登录、扫码后没有在网页里确认、或该账号已退出登录。"
+                    % (pan.PLATFORMS.get(self.platform, self.platform)))
+        save_btn = box.addButton("仍然保存", QMessageBox.AcceptRole)
+        box.addButton("继续登录", QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is save_btn:
+            self.cookies_ready.emit(cookie_str)
+            self.accept()
+        else:
+            self.title_lbl.setText("请在网页里完成登录")
 
     def _from_storage(self):
         """从持久化 Cookie 存储读取该站点应有的全部 Cookie（含父域 Cookie）。"""
