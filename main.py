@@ -371,6 +371,7 @@ class MainWindow(QWidget):
             item.setSizeHint(row.sizeHint())
             self.pan_accounts.addItem(item)
             self.pan_accounts.setItemWidget(item, row)
+            item.setSizeHint(QSize(0, max(44, row.sizeHint().height())))
 
     def logout_account(self, pid):
         import pan
