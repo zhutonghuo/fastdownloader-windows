@@ -397,6 +397,10 @@ def load_accounts():
 
 
 def save_account(platform, cookies, name=""):
+    cookies = (cookies or "").strip()
+    if not cookies:
+        # 空 Cookie 不算登录成功，避免账号列表出现「已登录但取不到文件」
+        return False
     acc = load_accounts()
     acc[platform] = {"cookie": cookies, "name": name or PLATFORMS.get(platform, platform),
                      "ts": time.time()}
@@ -404,6 +408,7 @@ def save_account(platform, cookies, name=""):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(acc, f, ensure_ascii=False)
+    return True
 
 
 def logout_account(platform):

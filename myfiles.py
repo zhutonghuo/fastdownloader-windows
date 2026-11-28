@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
+"""账号文件浏览器：浏览登录账号的网盘文件/文件夹并加入下载队列。"""
 import os
+import threading
+
 import pan
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
-    QListWidgetItem, QMessageBox, QInputDialog,
+    QListWidgetItem, QMessageBox,
 )
 
 
@@ -14,6 +17,8 @@ class MyFilesDialog(QDialog):
         self.platform = platform
         self.cookies = cookies
         self.stack = [("0", "全部文件")]
+        self._alive = True          # 对话框是否仍可安全访问 UI
+        self._result = []
         self.setWindowTitle("我的文件 · " + pan.PLATFORMS.get(platform, platform))
         self.resize(880, 620)
         v = QVBoxLayout(self)
@@ -39,32 +44,58 @@ class MyFilesDialog(QDialog):
 
         QTimer.singleShot(0, self.load)
 
+    # ---------- 生命周期保护 ----------
+    def closeEvent(self, e):
+        self._alive = False
+        super().closeEvent(e)
+
+    def _post(self, fn, *args):
+        """把 UI 更新切回主线程执行；若对话框已销毁则丢弃。"""
+        def runner():
+            if not self._alive:
+                return
+            try:
+                fn(*args)
+            except RuntimeError:
+                self._alive = False
+            except Exception:
+                pass
+        QTimer.singleShot(0, runner)
+
+    # ---------- 数据加载 ----------
     def load(self):
+        if not self._alive:
+            return
         fid, _ = self.stack[-1]
         self.path_lbl.setText(" / ".join(n for _, n in self.stack))
         self.list.clear()
         self.info.setText("加载中…")
+
         def work():
             try:
                 files = pan.list_my_files(self.platform, self.cookies, fid)
-                QTimer.singleShot(0, lambda: self.show_files(files))
+                self._post(self.show_files, files)
             except Exception as e:
-                QTimer.singleShot(0, lambda m=str(e): self.info.setText("加载失败：" + m[:120]))
-        import threading
+                self._post(self._fail, "加载失败：" + str(e)[:120])
+
         threading.Thread(target=work, daemon=True).start()
+
+    def _fail(self, msg):
+        self.info.setText(msg)
 
     def show_files(self, files):
         self.list.clear()
         for f in files:
+            f = f or {}
             icon = "📁" if f.get("is_dir") else "📄"
-            size = "" if f.get("is_dir") else ("  %.1f KB" % (f.get("size", 0) / 1024.0))
+            size = "" if f.get("is_dir") else ("  %.1f KB" % (float(f.get("size") or 0) / 1024.0))
             it = QListWidgetItem("%s  %s%s" % (icon, f.get("name", "文件"), size))
             it.setData(Qt.UserRole, f)
             self.list.addItem(it)
         self.info.setText("共 %d 项 · 双击文件夹进入，选中文件后点下载" % len(files))
 
     def on_double(self, item):
-        f = item.data(Qt.UserRole)
+        f = item.data(Qt.UserRole) or {}
         if f.get("is_dir"):
             self.stack.append((f.get("fid", "0"), f.get("name", "文件夹")))
             self.load()
@@ -76,24 +107,32 @@ class MyFilesDialog(QDialog):
 
     def download(self):
         items = self.list.selectedItems()
-        files = [it.data(Qt.UserRole) for it in items if not it.data(Qt.UserRole).get("is_dir")]
+        files = []
+        for it in items:
+            f = it.data(Qt.UserRole) or {}
+            if not f.get("is_dir"):
+                files.append(f)
         if not files:
             QMessageBox.information(self, "提示", "请先选中要下载的文件（文件夹请双击进入）")
             return
         self.info.setText("正在取直链…")
+
         def work():
             try:
                 direct = pan.myfile_direct(files, self.cookies)
-                QTimer.singleShot(0, lambda: self.accept_files(direct))
+                self._post(self.accept_files, direct)
             except Exception as e:
-                QTimer.singleShot(0, lambda m=str(e): (self.info.setText("取直链失败：" + m[:120]),
-                                  QMessageBox.warning(self, "取直链失败", m[:200])))
-        import threading
+                self._post(self._dl_fail, str(e))
+
         threading.Thread(target=work, daemon=True).start()
+
+    def _dl_fail(self, msg):
+        self.info.setText("取直链失败：" + msg[:120])
+        QMessageBox.warning(self, "取直链失败", msg[:200])
 
     def accept_files(self, direct):
         self._result = direct
         self.accept()
 
     def result_files(self):
-        return getattr(self, "_result", [])
+        return getattr(self, "_result", []) or []

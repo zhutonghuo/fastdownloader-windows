@@ -7,6 +7,7 @@ from PyQt5.QtGui import QIcon, QMovie, QPixmap, QPainter, QPen, QColor
 from PyQt5.QtNetwork import QNetworkCookie
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QFrame,
+    QMessageBox,
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineProfile, QWebEnginePage
 
@@ -178,6 +179,7 @@ class WebLoginDialog(QDialog):
             if not self._domain_ok(domain):
                 return
             self._cookies[name] = value
+            _log("cookie +%s (%s)" % (name, domain))
         except Exception:
             pass
 
@@ -196,19 +198,52 @@ class WebLoginDialog(QDialog):
         pass
 
     def _finish(self):
-        cookie_str = "; ".join("%s=%s" % (k, v) for k, v in self._cookies.items())
+        """提取 Cookie 并关闭。优先从 Cookie 存储读取（更完整），其次用监听到的增量。"""
+        cookie_str = self._from_storage()
         if not cookie_str:
-            cookie_str = self._from_storage()
+            cookie_str = "; ".join("%s=%s" % (k, v) for k, v in self._cookies.items())
+        if not cookie_str.strip():
+            _log("finish: no cookie")
+            QMessageBox.warning(
+                self, "未获取到 Cookie",
+                "没有在该站点检测到登录 Cookie。\n\n"
+                "请先在网页里完成登录（扫码或账号密码），页面显示已登录后，再点右上角「完成登录」。")
+            return
+        _log("finish: cookie %d 项" % len(cookie_str.split(";")))
         self.cookies_ready.emit(cookie_str)
         self.accept()
 
     def _from_storage(self):
+        """从持久化 Cookie 存储读取该站点应有的全部 Cookie（含父域 Cookie）。"""
         out = {}
-        host = (LOGIN_URLS.get(self.platform, "") or "").replace("https://", "").split("/")[0]
-        for domain in [host, "." + host]:
-            for name, value in self._collect(domain):
-                out[name] = value
+        url = LOGIN_URLS.get(self.platform)
+        if not url:
+            return ""
+        try:
+            store = self.profile.cookieStore()
+            for u in (url, url.rstrip("/") + "/"):
+                for c in store.cookieForUrl(QUrl(u)):
+                    name = bytes(c.name()).decode("utf-8", "replace")
+                    value = bytes(c.value()).decode("utf-8", "replace")
+                    domain = bytes(c.domain()).decode("utf-8", "replace")
+                    if not name or not value:
+                        continue
+                    if not self._domain_ok(domain):
+                        continue
+                    out[name] = value
+        except Exception:
+            _log("storage ERR " + traceback.format_exc())
         return "; ".join("%s=%s" % (k, v) for k, v in out.items())
 
     def _collect(self, domain):
-        return []
+        """兼容旧调用：返回指定域下的 (name, value) 列表。"""
+        out = []
+        try:
+            for c in self.profile.cookieStore().cookieForUrl(QUrl("https://" + domain.lstrip("."))):
+                name = bytes(c.name()).decode("utf-8", "replace")
+                value = bytes(c.value()).decode("utf-8", "replace")
+                if name and value:
+                    out.append((name, value))
+        except Exception:
+            pass
+        return out

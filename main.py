@@ -354,7 +354,8 @@ class MainWindow(QWidget):
         self.pan_accounts.clear()
         acc = pan.load_accounts()
         for pid, pname in self.PAN_PLATFORMS:
-            logged = pid in acc
+            info = acc.get(pid) or {}
+            logged = bool((info.get("cookie") or "").strip())
             item = QListWidgetItem()
             row = QWidget(); h = QHBoxLayout(row); h.setContentsMargins(10, 6, 10, 6)
             name = QLabel(("● " if logged else "○ ") + pname + ("  · 已登录" if logged else "  · 未登录"))
@@ -378,6 +379,99 @@ class MainWindow(QWidget):
         pan.logout_account(pid)
         self.refresh_accounts()
         self.toast("已退出 " + pid)
+
+    # ---------- 账号文件浏览 ----------
+    def open_my_files(self, platform):
+        """打开「我的文件」浏览器：浏览登录账号的网盘文件并下载。"""
+        try:
+            import pan
+            import myfiles
+        except Exception as e:
+            self._log_crash("open_my_files/import", e)
+            QMessageBox.warning(self, "功能不可用", "模块加载失败：%s" % str(e)[:120])
+            return
+        acc = pan.load_accounts()
+        cookies = (acc.get(platform) or {}).get("cookie", "")
+        if not cookies:
+            self.toast("登录态已失效，正在打开登录页…")
+            self.open_web_login(platform)
+            return
+        try:
+            dlg = myfiles.MyFilesDialog(platform, cookies, self, self.dark)
+            dlg.exec_()
+            files = dlg.result_files()
+        except Exception as e:
+            self._log_crash("open_my_files", e)
+            QMessageBox.warning(self, "打开失败", str(e)[:150])
+            return
+        if files:
+            self._enqueue_pan_direct(files, cookies)
+
+    @staticmethod
+    def _safe_name(name):
+        name = (name or "download").strip().replace("\\", "_").replace("/", "_")
+        name = name.replace(":", "_").replace("*", "_").replace("?", "_")
+        name = name.replace('"', "_").replace("<", "_").replace(">", "_").replace("|", "_")
+        return name or "download"
+
+    def _enqueue_pan_direct(self, direct, cookies=None):
+        """把解析出的直链加入多线程下载任务列表。"""
+        if not direct:
+            return
+        default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        try:
+            os.makedirs(default_dir, exist_ok=True)
+        except Exception:
+            default_dir = os.path.expanduser("~")
+        folder = QFileDialog.getExistingDirectory(self, "选择保存目录", default_dir)
+        if not folder:
+            self.toast("已取消下载")
+            return
+        used = set()
+        started = 0
+        for f in direct:
+            url = f.get("url")
+            if not url:
+                continue
+            name = self._safe_name(f.get("name") or "download")
+            base, ext = os.path.splitext(name)
+            i = 1
+            while name.lower() in used:
+                name = "%s(%d)%s" % (base, i, ext)
+                i += 1
+            used.add(name.lower())
+            dest = os.path.join(folder, name)
+            hdr = dict(f.get("headers") or {})
+            hdr.pop("Content-Type", None)   # 下载 GET 不应带 JSON 头
+            hdr.pop("Origin", None)
+            if cookies and "Cookie" not in hdr:
+                hdr["Cookie"] = cookies
+            threads = self.threads_for_pan()
+            card = DownloadTaskCard(dest, name, threads, self.dark)
+            self.dl_list.insertWidget(self.dl_list.count() - 1, card)
+            task = http_dl.Task(
+                url, dest, threads=threads, headers=hdr,
+                on_progress=lambda d, t, s, st, c=card: self._on_dl_progress(c, d, t, s, st),
+                on_done=lambda ok, m, c=card: self._on_dl_done(c, ok, m),
+            )
+            card.task = task
+            self.dl_tasks.append(task)
+            self.dl_body.setCurrentIndex(1)
+            task.start()
+            started += 1
+        if started:
+            self.toast("已加入 %d 个下载任务（%d 线程/个）" % (started, self.threads_for_pan()))
+
+    def _log_crash(self, where, e):
+        """把未捕获异常写日志，便于事后定位（不再直接闪退）。"""
+        try:
+            d = os.path.join(os.path.expanduser("~"), ".jisudownloader")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "crash.log"), "a", encoding="utf-8") as f:
+                f.write("\n=== %s @ %s ===\n%s\n" % (
+                    where, time.strftime("%Y-%m-%d %H:%M:%S"), traceback.format_exc()))
+        except Exception:
+            pass
 
     def _build_download_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
@@ -939,9 +1033,12 @@ class MainWindow(QWidget):
             dlg = web_login.WebLoginDialog(platform, self, self.dark)
             def on_cookies(cookie_str):
                 import pan
-                pan.save_account(platform, cookie_str)
+                ok = pan.save_account(platform, cookie_str)
                 self.refresh_accounts()
-                self.toast("已登录 %s，登录态已保存" % platform)
+                if ok:
+                    self.toast("已登录 %s，登录态已保存" % platform)
+                else:
+                    self.toast("未获取到 Cookie，请重新登录")
                 if on_done:
                     on_done(cookie_str)
             dlg.cookies_ready.connect(on_cookies)
@@ -1015,7 +1112,6 @@ class MainWindow(QWidget):
                     self.pan_parse_btn.setText("识别并下载")
                     QMessageBox.warning(self, "下载失败", msg[:200])
                 QTimer.singleShot(0, bad)
-        threading.Thread(target=work, daemon=True).start()
         threading.Thread(target=work, daemon=True).start()
 
     def threads_for_pan(self):
@@ -1123,6 +1219,42 @@ class MainWindow(QWidget):
             pass
         super().closeEvent(e)
 
+def _install_excepthook():
+    """全局异常兜底：槽函数里的未捕获异常不再让整个程序闪退，
+    统一写入 ~/.jisudownloader/crash.log 并弹窗提示。"""
+    def _report(text):
+        try:
+            d = os.path.join(os.path.expanduser("~"), ".jisudownloader")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "crash.log"), "a", encoding="utf-8") as f:
+                f.write("\n=== %s ===\n%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+        except Exception:
+            pass
+
+    def hook(etype, value, tb):
+        text = "".join(traceback.format_exception(etype, value, tb))
+        _report(text)
+        try:
+            if sys.stderr is not None:
+                sys.stderr.write(text)
+        except Exception:
+            pass
+        try:
+            QMessageBox.critical(None, "程序出错", "发生了一个未预期的错误，已记录日志：\n%s" % str(value)[:200])
+        except Exception:
+            pass
+
+    def thook(args):
+        text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        _report("[线程 %s]\n%s" % (getattr(args.thread, "name", "?"), text))
+
+    sys.excepthook = hook
+    try:
+        threading.excepthook = thook
+    except Exception:
+        pass
+
+
 def _setup_dpi():
     """高 DPI 适配：必须在创建 QApplication 之前调用。
     系统已缩放（>=125%）时交给 Qt 自动处理；4K 屏但系统仍是 100% 时强制放大，
@@ -1168,6 +1300,7 @@ def _setup_dpi():
 def main():
     _setup_dpi()
     app = QApplication(sys.argv)
+    _install_excepthook()
     app.setApplicationName("极速下载器 Windows")
     # 基准字号兜底（Qt 默认 9pt 偏小）
     f = app.font()
@@ -1183,6 +1316,33 @@ def main():
         except Exception:
             pass
     QTimer.singleShot(800, _warm)
+    if "--selftest-myfiles" in sys.argv:
+        def _selftest_mf():
+            """打包版自检：走一遍「我的文件」入口，确保不闪退。"""
+            lg = os.path.join(os.path.expanduser("~"), ".jisudownloader", "weblogin.log")
+            try:
+                import pan, myfiles
+                pan._account_file = lambda: os.path.join(
+                    os.path.dirname(lg), "selftest_accounts.json")
+                import json as _json
+                with open(pan._account_file(), "w", encoding="utf-8") as f:
+                    _json.dump({"quark": {"cookie": "__pus=self;test=1", "ts": 1}}, f)
+
+                class _Fake:
+                    def __init__(self, platform, cookies, parent=None, dark=False):
+                        pass
+                    def exec_(self):
+                        return 1
+                    def result_files(self):
+                        return []
+                myfiles.MyFilesDialog = _Fake
+                w.open_my_files("quark")
+                open(lg, "a", encoding="utf-8").write("SELFTEST-MYFILES OK\n")
+            except Exception:
+                os.makedirs(os.path.dirname(lg), exist_ok=True)
+                open(lg, "a", encoding="utf-8").write("SELFTEST-MYFILES ERR " + traceback.format_exc())
+            app.quit()
+        QTimer.singleShot(600, _selftest_mf)
     if "--selftest-login" in sys.argv:
         def _selftest():
             try:
