@@ -2,8 +2,8 @@
 import re
 import os
 import traceback
-from PyQt5.QtCore import QUrl, pyqtSignal
-from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import QUrl, pyqtSignal, Qt, QTimer
+from PyQt5.QtGui import QIcon, QMovie, QPixmap, QPainter, QPen, QColor
 from PyQt5.QtNetwork import QNetworkCookie
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QFrame,
@@ -34,6 +34,31 @@ def _log(msg):
         pass
 
 
+class Spinner(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.angle = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(40, 40)
+
+    def start(self):
+        self._timer.start(60)
+
+    def stop(self):
+        self._timer.stop()
+
+    def _tick(self):
+        self.angle = (self.angle + 24) % 360
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor("#2563eb"), 4, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(4, 4, 32, 32, self.angle * 16, 260 * 16)
+
+
 _warm_view = None
 
 
@@ -48,6 +73,11 @@ def warm_up():
         _log("warmup done")
     except Exception:
         _log("warmup ERR " + traceback.format_exc())
+
+
+class LoginPage(QWebEnginePage):
+    def createWindow(self, typ):
+        return self
 
 
 class WebLoginDialog(QDialog):
@@ -77,11 +107,25 @@ class WebLoginDialog(QDialog):
         v.addWidget(bar)
 
         self.view = QWebEngineView()
+        self.view.setPage(LoginPage(self.view))
         self.profile = QWebEngineProfile.defaultProfile()
         self.profile.setHttpUserAgent(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
         v.addWidget(self.view, 1)
+
+        self.overlay = QFrame(self.view)
+        self.overlay.setStyleSheet("background:rgba(244,247,252,235);")
+        ov = QVBoxLayout(self.overlay)
+        ov.setAlignment(Qt.AlignCenter)
+        self.spinner = Spinner(self.overlay)
+        ov.addWidget(self.spinner, 0, Qt.AlignCenter)
+        self.wait_lbl = QLabel("webview加载较慢，请稍等…")
+        self.wait_lbl.setAlignment(Qt.AlignCenter)
+        self.wait_lbl.setStyleSheet("font-size:13px;color:#586a80;margin-top:10px;")
+        ov.addWidget(self.wait_lbl, 0, Qt.AlignCenter)
+        self.overlay.setGeometry(self.view.rect())
+        self.spinner.start()
         _log("profile ready")
 
         hint = QLabel("提示：在网页里正常登录（扫码 / 账号密码均可）。登录后点右上角「完成登录」，程序会自动提取该站 Cookie。")
@@ -102,11 +146,18 @@ class WebLoginDialog(QDialog):
         except Exception:
             _log("load ERR " + traceback.format_exc())
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if hasattr(self, "overlay") and hasattr(self, "view"):
+            self.overlay.setGeometry(self.view.rect())
+
     def _on_progress(self, pct):
         self.title_lbl.setText("登录 %s · 加载中 %d%%" % (self.platform, pct))
 
     def _on_loaded(self, ok):
         self.title_lbl.setText("登录 %s · 完成后点「完成登录」" % self.platform)
+        self.overlay.hide()
+        self.spinner.stop()
         _log("load finished ok=%s" % ok)
 
     def _on_cookie(self, cookie):
