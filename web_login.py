@@ -7,7 +7,7 @@ from PyQt5.QtGui import QIcon, QMovie, QPixmap, QPainter, QPen, QColor
 from PyQt5.QtNetwork import QNetworkCookie
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QFrame,
-    QMessageBox,
+    QMessageBox, QInputDialog,
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineProfile, QWebEnginePage
 
@@ -129,6 +129,9 @@ class WebLoginDialog(QDialog):
         bl.addWidget(self.title_lbl); bl.addStretch(1)
         clr = QPushButton("清除Cookie"); clr.setObjectName("gray")
         clr.clicked.connect(self._clear_cookies); bl.addWidget(clr)
+        manual = QPushButton("手动输入Cookie"); manual.setObjectName("gray")
+        manual.setToolTip("从浏览器开发者工具复制 Cookie 粘贴进来（网页自动提取失败时用）")
+        manual.clicked.connect(self._manual_cookie); bl.addWidget(manual)
         done = QPushButton("完成登录"); done.setObjectName("primary")
         done.clicked.connect(self._finish); bl.addWidget(done)
         cancel = QPushButton("取消"); cancel.setObjectName("gray")
@@ -297,8 +300,42 @@ class WebLoginDialog(QDialog):
             QMessageBox.warning(
                 self, "未获取到 Cookie",
                 "没有在该站点检测到任何 Cookie。\n\n"
-                "请先在网页里完成登录（扫码或账号密码），页面显示已登录后，再点「完成登录」。")
+                "请先在网页里完成登录（扫码或账号密码），页面显示已登录后，再点「完成登录」；\n"
+                "也可以点「手动输入Cookie」，从浏览器开发者工具里复制 Cookie 粘贴进来。")
             return
+        self._finish_with_cookie(cookie_str)
+
+    def _manual_cookie(self):
+        """手动粘贴 Cookie：从浏览器 F12 → 网络 → 任选该站请求 → 请求头 Cookie 整行复制。"""
+        text, ok = QInputDialog.getMultiLineText(
+            self, "手动输入 Cookie · " + self.platform,
+            "从浏览器开发者工具复制该站点的 Cookie，整段粘贴到下面：\n"
+            "（F12 → Network → 点一条该站请求 → Headers → Request Headers → Cookie，整行复制）",
+            "", QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        if not ok:
+            return
+        raw = (text or "").strip()
+        if not raw:
+            QMessageBox.warning(self, "未输入", "Cookie 为空，请先复制再粘贴。")
+            return
+        # 支持直接粘 "Cookie: xxx" 整行，也支持 key=value; k=v 形式
+        if raw.lower().startswith("cookie:"):
+            raw = raw.split(":", 1)[1].strip()
+        parts = {}
+        for item in raw.replace("\n", ";").split(";"):
+            if "=" in item:
+                k, v = item.strip().split("=", 1)
+                if k and v:
+                    parts[k.strip()] = v.strip()
+        if not parts:
+            QMessageBox.warning(self, "格式不对", "没识别出 key=value 形式的 Cookie，请检查粘贴内容。")
+            return
+        cookie_str = "; ".join("%s=%s" % (k, v) for k, v in parts.items())
+        _log("manual cookie: %d 项" % len(parts))
+        self._finish_with_cookie(cookie_str)
+
+    def _finish_with_cookie(self, cookie_str):
+        """统一校验入口：自动提取和手动输入都走这里。"""
         _log("finish: cookie %d 项，开始校验登录态" % len(cookie_str.split(";")))
         self.title_lbl.setText("正在校验登录状态…")
         self._verify_then(cookie_str)
