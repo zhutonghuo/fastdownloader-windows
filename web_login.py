@@ -21,7 +21,15 @@ LOGIN_URLS = {
     "guangya": "https://www.guangyapan.com",
     "ilanzou": "https://www.ilanzou.com",
     "lanzou": "https://www.lanzoui.com",
+    "github": "https://github.com/login",
 }
+
+
+def login_url_for(platform):
+    url = LOGIN_URLS.get(platform)
+    if not url:
+        raise ValueError("没有 %s 的登录地址" % platform)
+    return url
 
 
 def _log(msg):
@@ -141,7 +149,7 @@ class WebLoginDialog(QDialog):
         _log("cookie store connected")
 
         try:
-            self.view.load(QUrl(LOGIN_URLS.get(platform, "https://www.baidu.com")))
+            self.view.load(QUrl(login_url_for(platform)))
             _log("load called")
         except Exception:
             _log("load ERR " + traceback.format_exc())
@@ -164,10 +172,25 @@ class WebLoginDialog(QDialog):
         try:
             name = bytes(cookie.name()).decode("utf-8", "replace")
             value = bytes(cookie.value()).decode("utf-8", "replace")
-            if name and value and len(name) < 80 and len(value) < 2000:
-                self._cookies[name] = value
+            domain = bytes(cookie.domain()).decode("utf-8", "replace")
+            if not name or not value or len(name) >= 80 or len(value) >= 2000:
+                return
+            if not self._domain_ok(domain):
+                return
+            self._cookies[name] = value
         except Exception:
             pass
+
+    def _domain_ok(self, domain):
+        if not domain:
+            return True
+        host = (LOGIN_URLS.get(self.platform, "") or "").replace("https://", "").split("/")[0]
+        if not host:
+            return True
+        d = domain.lstrip(".").lower()
+        h = host.lower()
+        base = ".".join(h.split(".")[-2:]) if h.count(".") >= 1 else h
+        return d == h or d.endswith("." + base) or h.endswith("." + d) or d == base
 
     def _on_url(self, url):
         pass
@@ -181,7 +204,7 @@ class WebLoginDialog(QDialog):
 
     def _from_storage(self):
         out = {}
-        host = (LOGIN_URLS.get(self.platform, "").replace("https://", "").split("/")[0])
+        host = (LOGIN_URLS.get(self.platform, "") or "").replace("https://", "").split("/")[0]
         for domain in [host, "." + host]:
             for name, value in self._collect(domain):
                 out[name] = value
